@@ -1,0 +1,12 @@
+[package]
+name = "nexus-config"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nexus-shared = { path = "../nexus-shared" }
+nexus-storage = { path = "../nexus-storage" }
+serde.workspace = true

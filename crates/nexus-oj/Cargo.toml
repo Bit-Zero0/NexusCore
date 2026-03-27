@@ -1,0 +1,22 @@
+[package]
+name = "nexus-oj"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nexus-shared = { path = "../nexus-shared" }
+nexus-runtime = { path = "../nexus-runtime" }
+nexus-storage = { path = "../nexus-storage" }
+async-trait.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tower = "0.5"

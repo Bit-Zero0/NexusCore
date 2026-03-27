@@ -1,0 +1,13 @@
+[package]
+name = "nexus-storage"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nexus-shared = { path = "../nexus-shared" }
+serde.workspace = true
+sqlx.workspace = true
+tokio.workspace = true

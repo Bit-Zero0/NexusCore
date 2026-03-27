@@ -1,0 +1,24 @@
+[package]
+name = "nexus-gateway"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nexus-auth = { path = "../nexus-auth" }
+nexus-config = { path = "../nexus-config" }
+nexus-oj = { path = "../nexus-oj" }
+nexus-runtime = { path = "../nexus-runtime" }
+nexus-storage = { path = "../nexus-storage" }
+nexus-shared = { path = "../nexus-shared" }
+axum.workspace = true
+async-trait.workspace = true
+redis.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tower-http.workspace = true

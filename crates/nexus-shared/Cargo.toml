@@ -1,0 +1,13 @@
+[package]
+name = "nexus-shared"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+

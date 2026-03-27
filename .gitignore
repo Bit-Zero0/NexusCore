@@ -1,0 +1,42 @@
+# Rust workspace
+/target/
+**/*.rs.bk
+
+# Frontend build and deps
+/NexusCodeFrontend/node_modules/
+/NexusCodeFrontend/dist/
+/NexusCodeFrontend/dist-ssr/
+/NexusCodeFrontend/coverage/
+/NexusCodeFrontend/.vite/
+/NexusCodeFrontend/*.tsbuildinfo
+/NexusCodeFrontend/.eslintcache
+
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+*.local
+
+# Editors and OS files
+/.idea/
+/.vscode/
+**/.idea/
+**/.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temp
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Python / test helpers
+__pycache__/
+*.pyc
+
+# Local scratch files
+kill
