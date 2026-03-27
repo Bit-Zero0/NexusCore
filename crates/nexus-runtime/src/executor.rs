@@ -3648,15 +3648,11 @@ fn main() {
         ))
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert_eq!(outcome.cases.len(), 1);
+        assert_failed_with_single_case(&outcome);
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::MemoryLimitExceeded
-        ));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
     }
 
     #[tokio::test]
@@ -3680,15 +3676,11 @@ int main() {
 "#,
         ))
         .await;
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert_eq!(outcome.cases.len(), 1);
+        assert_failed_with_single_case(&outcome);
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::SecurityViolation
-        ));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
     }
 
     #[tokio::test]
@@ -3710,15 +3702,11 @@ int main() {
         ))
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert_eq!(outcome.cases.len(), 1);
+        assert_failed_with_single_case(&outcome);
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::TimeLimitExceeded
-        ));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
     }
 
     #[tokio::test]
@@ -3760,15 +3748,11 @@ int main() {
         ))
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert_eq!(outcome.cases.len(), 1);
+        assert_failed_with_single_case(&outcome);
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::SecurityViolation
-        ));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
     }
 
     #[tokio::test]
@@ -3790,15 +3774,11 @@ int main() {
         ))
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert_eq!(outcome.cases.len(), 1);
+        assert_failed_with_single_case(&outcome);
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::TimeLimitExceeded
-        ));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
     }
 
     #[tokio::test]
@@ -3823,17 +3803,13 @@ int main() {
         )
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert_eq!(outcome.cases.len(), 1);
+        assert_failed_with_single_case(&outcome);
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::SecurityViolation
                 | super::RuntimeCaseFinalStatus::RuntimeError
                 | super::RuntimeCaseFinalStatus::TimeLimitExceeded
-        ));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
     }
 
     #[tokio::test]
@@ -3854,17 +3830,17 @@ int main() {
         )
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert_eq!(outcome.cases.len(), 1);
+        assert_failed_with_single_case(&outcome);
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::SecurityViolation
                 | super::RuntimeCaseFinalStatus::RuntimeError
-        ));
-        assert!(!outcome.cases[0].stdout_excerpt.contains("pwned"));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            !outcome.cases[0].stdout_excerpt.contains("pwned"),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3888,17 +3864,17 @@ fn main() {
         )
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert_eq!(outcome.cases.len(), 1);
+        assert_failed_with_single_case(&outcome);
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::SecurityViolation
                 | super::RuntimeCaseFinalStatus::RuntimeError
-        ));
-        assert!(!outcome.cases[0].stdout_excerpt.contains("pwned"));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            !outcome.cases[0].stdout_excerpt.contains("pwned"),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3919,13 +3895,19 @@ fn main() {
         assert!(matches!(
             outcome.final_status,
             RuntimeTaskLifecycleStatus::Failed
-        ));
-        assert!(outcome.cases.is_empty());
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            outcome.cases.is_empty(),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
         let compile = outcome.compile.expect("compile outcome should exist");
         assert!(matches!(compile.status, RuntimeStageStatus::Failed));
         assert_eq!(
             compile.failure_kind,
-            Some(super::RuntimeFailureKind::SecurityViolation)
+            Some(super::RuntimeFailureKind::SecurityViolation),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
         );
         assert!(compile.stderr_excerpt.contains("/etc/passwd"));
         assert!(!compile.stderr_excerpt.contains("root:x:"));
@@ -4340,6 +4322,24 @@ fn main() {
         let mut task = wasm_runtime_task(language);
         task.sandbox_kind = RuntimeSandboxKind::NsjailWasm;
         task
+    }
+
+    fn outcome_debug(outcome: &super::RuntimeExecutionOutcome) -> String {
+        format!("{outcome:#?}")
+    }
+
+    fn assert_failed_with_single_case(outcome: &super::RuntimeExecutionOutcome) {
+        assert!(
+            matches!(outcome.final_status, RuntimeTaskLifecycleStatus::Failed),
+            "unexpected outcome:\n{}",
+            outcome_debug(outcome)
+        );
+        assert_eq!(
+            outcome.cases.len(),
+            1,
+            "unexpected outcome:\n{}",
+            outcome_debug(outcome)
+        );
     }
 
     async fn execute_runtime_task(task: RuntimeTask) -> super::RuntimeExecutionOutcome {
