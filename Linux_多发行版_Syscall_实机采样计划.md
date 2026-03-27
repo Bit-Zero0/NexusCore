@@ -9,7 +9,9 @@
 当前我们已经有：
 
 - `NEXUS_RUNTIME_SYSCALL_FLAVOR`
+- `NEXUS_RUNTIME_SYSCALL_ARCH`
 - `auto / generic / debian_ubuntu / arch / rhel_like`
+- `auto / x86_64 / aarch64 / other`
 - `seccomp_profiles` 调试导出工具
 - `collect_runtime_syscall_baseline.sh`
 - `compare_runtime_seccomp_profiles.sh`
@@ -24,18 +26,21 @@
 
 ## 采样目标矩阵
 
-建议最少覆盖这 3 类主机：
+建议最少覆盖这几类主机：
 
-1. Debian/Ubuntu
+1. Debian/Ubuntu x86_64
    例如：Ubuntu 22.04 / 24.04，Debian 12
 
-2. RHEL-like
+2. RHEL-like x86_64
    例如：Rocky Linux 9 / AlmaLinux 9 / CentOS Stream 9
 
-3. Arch
+3. Arch x86_64
    例如：Arch Linux / Manjaro
 
-每类主机至少采样一次。
+4. 已有样本
+   `Oracle Ubuntu ARM64`
+
+每类主机至少采样一次。当前 ARM 样本已经有一份，但它应单独看待。
 
 ## 采样前准备
 
@@ -70,12 +75,20 @@ bash scripts/compare_runtime_seccomp_profiles.sh \
   auto
 ```
 
-如果要显式指定 flavor：
+如果要显式指定 family 与 architecture：
 
 ```bash
 bash scripts/compare_runtime_seccomp_profiles.sh \
   /tmp/nexus-seccomp-compare \
   debian_ubuntu
+```
+
+然后单独导出 profile：
+
+```bash
+cargo run -q --manifest-path ./Cargo.toml \
+  -p nexus-runtime --bin seccomp_profiles -- \
+  --flavor=debian_ubuntu --arch=aarch64 --json > /tmp/nexus-seccomp-compare/seccomp_profiles_debian_ubuntu_aarch64.json
 ```
 
 输出重点看：
@@ -110,9 +123,10 @@ bash scripts/compare_runtime_seccomp_profiles.sh \
 
 1. `/etc/os-release`
 2. `uname -a`
-3. `compare_runtime_seccomp_profiles.sh` 的完整输出
-4. `/tmp/nexus-seccomp-compare/baseline_report.txt`
-5. `/tmp/nexus-seccomp-compare/seccomp_profiles_*.json`
+3. `uname -m`
+4. `compare_runtime_seccomp_profiles.sh` 的完整输出
+5. `/tmp/nexus-seccomp-compare/baseline_report.txt`
+6. `/tmp/nexus-seccomp-compare/seccomp_profiles_*.json`
 
 建议按这样的目录归档：
 
@@ -120,6 +134,7 @@ bash scripts/compare_runtime_seccomp_profiles.sh \
 artifacts/
   syscall-sampling/
     ubuntu-24.04/
+    oracle-ubuntu-arm64/
     rocky-9/
     arch-latest/
 ```
@@ -150,9 +165,18 @@ artifacts/
    - `sched_getaffinity`
 
 6. `wasmtime_runtime_extras`
-   当前 `rhel_like` 先不主动带：
-   - `memfd_create`
-   - `sched_yield`
+  当前 `rhel_like` 先不主动带：
+  - `memfd_create`
+  - `sched_yield`
+
+7. `aarch64` 专项
+   当前已经基于样本先补：
+   - `rust_runtime_extras -> ppoll`
+   - `wasmtime_runtime_extras -> epoll_pwait / getpid / membarrier / mkdirat / ppoll / renameat`
+
+   后面要确认这些是否是：
+   - 通用 `aarch64` 现象
+   - 还是 `Oracle Ubuntu ARM64` 的特定现象
 
 ## 判定原则
 

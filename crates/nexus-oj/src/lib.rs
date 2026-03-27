@@ -197,8 +197,8 @@ mod tests {
     use nexus_runtime::{
         build_default_runtime_catalog, InMemoryRuntimeTaskQueue, NoopRuntimeEventObserver,
         RuntimeCaseFinalStatus, RuntimeCaseOutcome, RuntimeExecutionOutcome, RuntimeSeccompMode,
-        RuntimeSyscallFlavor, RuntimeTaskEvent, RuntimeTaskLifecycleStatus, RuntimeTaskService,
-        RuntimeWorker,
+        RuntimeSyscallArch, RuntimeSyscallFlavor, RuntimeTaskEvent, RuntimeTaskLifecycleStatus,
+        RuntimeTaskService, RuntimeWorker,
     };
     use nexus_shared::{ProblemId, UserId};
     use serde_json::Value;
@@ -402,6 +402,7 @@ mod tests {
                 "/usr/bin/nsjail",
                 RuntimeSeccompMode::Log,
                 RuntimeSyscallFlavor::Generic,
+                RuntimeSyscallArch::X86_64,
             )),
             Arc::new(InMemoryRuntimeTaskQueue::default()),
             Arc::new(NoopRuntimeEventObserver),

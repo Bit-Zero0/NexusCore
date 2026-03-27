@@ -76,7 +76,7 @@ pub struct RuntimeWorker {
     work_root: Arc<PathBuf>,
     nsjail_path: Arc<String>,
     seccomp_mode: RuntimeSeccompMode,
-    syscall_flavor: RuntimeSyscallFlavor,
+    syscall_profile: RuntimeSyscallProfile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +96,21 @@ pub enum RuntimeSyscallFlavor {
     RhelLike,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSyscallArch {
+    Auto,
+    X86_64,
+    Aarch64,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSyscallProfile {
+    pub flavor: RuntimeSyscallFlavor,
+    pub arch: RuntimeSyscallArch,
+}
+
 impl RuntimeWorker {
     pub fn new(
         catalog: RuntimeLanguageCatalog,
@@ -103,13 +118,14 @@ impl RuntimeWorker {
         nsjail_path: impl Into<String>,
         seccomp_mode: RuntimeSeccompMode,
         syscall_flavor: RuntimeSyscallFlavor,
+        syscall_arch: RuntimeSyscallArch,
     ) -> Self {
         Self {
             catalog,
             work_root: Arc::new(work_root.into()),
             nsjail_path: Arc::new(nsjail_path.into()),
             seccomp_mode,
-            syscall_flavor: resolve_runtime_syscall_flavor(syscall_flavor),
+            syscall_profile: resolve_runtime_syscall_profile(syscall_flavor, syscall_arch),
         }
     }
 
@@ -361,7 +377,7 @@ impl RuntimeWorker {
         let stderr_path = work_dir.join("compile.stderr");
         let command = match plan.execution_backend {
             RuntimeExecutionBackend::NsjailNative => {
-                let seccomp = compiler_seccomp_policy_string(self.syscall_flavor);
+                let seccomp = compiler_seccomp_policy_string(self.syscall_profile);
                 wrap_with_nsjail(
                     &self.nsjail_path,
                     work_dir,
@@ -384,7 +400,7 @@ impl RuntimeWorker {
                 },
             ),
             RuntimeExecutionBackend::NsjailWasm => {
-                let seccomp = compiler_seccomp_policy_string(self.syscall_flavor);
+                let seccomp = compiler_seccomp_policy_string(self.syscall_profile);
                 wrap_with_nsjail(
                     &self.nsjail_path,
                     work_dir,
@@ -426,10 +442,10 @@ impl RuntimeWorker {
     ) -> RuntimePreparedStage {
         let command = match plan.execution_backend {
             RuntimeExecutionBackend::NsjailNative => {
-                let seccomp = seccomp_policy_string_with_mode(
+                let seccomp = seccomp_policy_string_with_mode_for_profile(
                     &plan.seccomp_policy,
                     self.seccomp_mode,
-                    self.syscall_flavor,
+                    self.syscall_profile,
                 );
                 wrap_with_nsjail(
                     &self.nsjail_path,
@@ -453,10 +469,10 @@ impl RuntimeWorker {
                 },
             ),
             RuntimeExecutionBackend::NsjailWasm => {
-                let seccomp = seccomp_policy_string_with_mode(
+                let seccomp = seccomp_policy_string_with_mode_for_profile(
                     &plan.seccomp_policy,
                     self.seccomp_mode,
-                    self.syscall_flavor,
+                    self.syscall_profile,
                 );
                 wrap_with_nsjail(
                     &self.nsjail_path,
@@ -514,7 +530,7 @@ impl RuntimeWorker {
                     &self.nsjail_path,
                     work_dir,
                     &command,
-                    &compiler_seccomp_policy_string(self.syscall_flavor),
+                    &compiler_seccomp_policy_string(self.syscall_profile),
                     RuntimeSeccompMode::Log,
                     30,
                     1024 * 1024 * 1024,
@@ -565,14 +581,14 @@ impl RuntimeWorker {
             Path::new(&case_dir.answer_path),
         ));
 
-        let seccomp = seccomp_policy_string_with_mode(
+        let seccomp = seccomp_policy_string_with_mode_for_profile(
             if spj.language == "python" {
                 "python_default"
             } else {
                 "cpp_default"
             },
             self.seccomp_mode,
-            self.syscall_flavor,
+            self.syscall_profile,
         );
         let stage = RuntimePreparedStage {
             stage_name: format!("spj_case_{}", case_dir.case_no),
@@ -2183,24 +2199,51 @@ fn seccomp_profile_for_policy(policy: &str) -> SeccompProfile {
     }
 }
 
+#[cfg(test)]
 fn seccomp_policy_string_with_mode(
     policy: &str,
     mode: RuntimeSeccompMode,
     flavor: RuntimeSyscallFlavor,
 ) -> String {
-    build_seccomp_policy(seccomp_profile_for_policy(policy), mode, flavor)
+    seccomp_policy_string_with_mode_and_arch(policy, mode, flavor, RuntimeSyscallArch::Auto)
 }
 
-fn compiler_seccomp_policy_string(flavor: RuntimeSyscallFlavor) -> String {
-    build_seccomp_policy(SeccompProfile::Compiler, RuntimeSeccompMode::Log, flavor)
+fn seccomp_policy_string_with_mode_for_profile(
+    policy: &str,
+    mode: RuntimeSeccompMode,
+    syscall_profile: RuntimeSyscallProfile,
+) -> String {
+    build_seccomp_policy(seccomp_profile_for_policy(policy), mode, syscall_profile)
+}
+
+#[cfg(test)]
+fn seccomp_policy_string_with_mode_and_arch(
+    policy: &str,
+    mode: RuntimeSeccompMode,
+    flavor: RuntimeSyscallFlavor,
+    arch: RuntimeSyscallArch,
+) -> String {
+    build_seccomp_policy(
+        seccomp_profile_for_policy(policy),
+        mode,
+        RuntimeSyscallProfile { flavor, arch },
+    )
+}
+
+fn compiler_seccomp_policy_string(syscall_profile: RuntimeSyscallProfile) -> String {
+    build_seccomp_policy(
+        SeccompProfile::Compiler,
+        RuntimeSeccompMode::Log,
+        syscall_profile,
+    )
 }
 
 fn build_seccomp_policy(
     profile: SeccompProfile,
     mode: RuntimeSeccompMode,
-    flavor: RuntimeSyscallFlavor,
+    syscall_profile: RuntimeSyscallProfile,
 ) -> String {
-    let syscalls = seccomp_profile_syscalls(profile, flavor);
+    let syscalls = seccomp_profile_syscalls(profile, syscall_profile);
     let default_action = match mode {
         RuntimeSeccompMode::Log => "LOG",
         RuntimeSeccompMode::Kill => "KILL",
@@ -2264,11 +2307,11 @@ fn seccomp_profile_groups(profile: SeccompProfile) -> &'static [SyscallGroup] {
 
 fn seccomp_profile_syscalls(
     profile: SeccompProfile,
-    flavor: RuntimeSyscallFlavor,
+    syscall_profile: RuntimeSyscallProfile,
 ) -> Vec<&'static str> {
     let mut allowed = Vec::new();
     for group in seccomp_profile_groups(profile) {
-        allowed.extend(syscall_group_expansion(*group, flavor));
+        allowed.extend(syscall_group_expansion(*group, syscall_profile));
     }
     allowed.sort();
     allowed.dedup();
@@ -2294,11 +2337,13 @@ fn syscall_group_name(group: SyscallGroup) -> &'static str {
 
 fn syscall_group_expansion(
     group: SyscallGroup,
-    flavor: RuntimeSyscallFlavor,
-) -> &'static [&'static str] {
+    syscall_profile: RuntimeSyscallProfile,
+) -> Vec<&'static str> {
+    let flavor = syscall_profile.flavor;
+    let arch = syscall_profile.arch;
     match group {
         SyscallGroup::RuntimeCore => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &[
+            RuntimeSyscallFlavor::DebianUbuntu => vec![
                 "access",
                 "arch_prctl",
                 "brk",
@@ -2323,7 +2368,7 @@ fn syscall_group_expansion(
                 "write",
                 "writev",
             ],
-            RuntimeSyscallFlavor::Arch => &[
+            RuntimeSyscallFlavor::Arch => vec![
                 "access",
                 "arch_prctl",
                 "brk",
@@ -2348,7 +2393,7 @@ fn syscall_group_expansion(
                 "write",
                 "writev",
             ],
-            RuntimeSyscallFlavor::RhelLike => &[
+            RuntimeSyscallFlavor::RhelLike => vec![
                 "access",
                 "arch_prctl",
                 "brk",
@@ -2371,7 +2416,7 @@ fn syscall_group_expansion(
                 "set_tid_address",
                 "write",
             ],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => &[
+            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => vec![
                 "access",
                 "arch_prctl",
                 "brk",
@@ -2398,64 +2443,72 @@ fn syscall_group_expansion(
             ],
         },
         SyscallGroup::FileStatCompat => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &["fstat", "newfstat", "newfstatat", "statx"],
-            RuntimeSyscallFlavor::Arch => &["fstat", "newfstatat", "statx"],
-            RuntimeSyscallFlavor::RhelLike => &["newfstat", "newfstatat", "statx"],
+            RuntimeSyscallFlavor::DebianUbuntu => vec!["fstat", "newfstat", "newfstatat", "statx"],
+            RuntimeSyscallFlavor::Arch => vec!["fstat", "newfstatat", "statx"],
+            RuntimeSyscallFlavor::RhelLike => vec!["newfstat", "newfstatat", "statx"],
             RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => {
-                &["newfstat", "newfstatat"]
+                vec!["newfstat", "newfstatat"]
             }
         },
         SyscallGroup::FileOpenCompat => match flavor {
             RuntimeSyscallFlavor::DebianUbuntu => {
-                &["open", "openat", "readlink", "readlinkat", "unlink"]
+                vec!["open", "openat", "readlink", "readlinkat", "unlink"]
             }
-            RuntimeSyscallFlavor::Arch => &["open", "openat", "readlinkat", "unlink"],
-            RuntimeSyscallFlavor::RhelLike => &["openat", "readlinkat", "unlink"],
+            RuntimeSyscallFlavor::Arch => vec!["open", "openat", "readlinkat", "unlink"],
+            RuntimeSyscallFlavor::RhelLike => vec!["openat", "readlinkat", "unlink"],
             RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => {
-                &["open", "openat", "readlinkat", "unlink"]
+                vec!["open", "openat", "readlinkat", "unlink"]
             }
         },
         SyscallGroup::ProcessLifecycleCompat => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &["wait4", "waitid"],
-            RuntimeSyscallFlavor::Arch => &["wait4"],
-            RuntimeSyscallFlavor::RhelLike => &["wait4", "waitid"],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => &["wait4"],
+            RuntimeSyscallFlavor::DebianUbuntu => vec!["wait4", "waitid"],
+            RuntimeSyscallFlavor::Arch => vec!["wait4"],
+            RuntimeSyscallFlavor::RhelLike => vec!["wait4", "waitid"],
+            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => vec!["wait4"],
         },
         SyscallGroup::ThreadCompat => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &["clone", "clone3"],
-            RuntimeSyscallFlavor::Arch => &["clone", "clone3"],
-            RuntimeSyscallFlavor::RhelLike => &["clone3"],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => &["clone", "clone3"],
+            RuntimeSyscallFlavor::DebianUbuntu => vec!["clone", "clone3"],
+            RuntimeSyscallFlavor::Arch => vec!["clone", "clone3"],
+            RuntimeSyscallFlavor::RhelLike => vec!["clone3"],
+            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => vec!["clone", "clone3"],
         },
         SyscallGroup::SignalCompat => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &[
+            RuntimeSyscallFlavor::DebianUbuntu => vec![
                 "rt_sigaction",
                 "rt_sigprocmask",
                 "sigaltstack",
                 "rt_sigreturn",
             ],
-            RuntimeSyscallFlavor::Arch => &["rt_sigaction", "rt_sigprocmask", "sigaltstack"],
-            RuntimeSyscallFlavor::RhelLike => &["rt_sigaction", "rt_sigprocmask"],
+            RuntimeSyscallFlavor::Arch => vec!["rt_sigaction", "rt_sigprocmask", "sigaltstack"],
+            RuntimeSyscallFlavor::RhelLike => vec!["rt_sigaction", "rt_sigprocmask"],
             RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => {
-                &["rt_sigaction", "rt_sigprocmask", "sigaltstack"]
+                vec!["rt_sigaction", "rt_sigprocmask", "sigaltstack"]
             }
         },
         SyscallGroup::CppRuntimeExtras => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &["ioctl"],
-            RuntimeSyscallFlavor::Arch => &["ioctl"],
-            RuntimeSyscallFlavor::RhelLike => &[],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => &["ioctl"],
+            RuntimeSyscallFlavor::DebianUbuntu => vec!["ioctl"],
+            RuntimeSyscallFlavor::Arch => vec!["ioctl"],
+            RuntimeSyscallFlavor::RhelLike => Vec::new(),
+            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => vec!["ioctl"],
         },
-        SyscallGroup::RustRuntimeExtras => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &["gettid", "poll", "sched_getaffinity"],
-            RuntimeSyscallFlavor::Arch => &["gettid", "poll", "sched_getaffinity"],
-            RuntimeSyscallFlavor::RhelLike => &["gettid", "poll"],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => {
-                &["gettid", "poll", "sched_getaffinity"]
+        SyscallGroup::RustRuntimeExtras => {
+            let mut syscalls = match flavor {
+                RuntimeSyscallFlavor::DebianUbuntu => {
+                    vec!["gettid", "poll", "sched_getaffinity"]
+                }
+                RuntimeSyscallFlavor::Arch => vec!["gettid", "poll", "sched_getaffinity"],
+                RuntimeSyscallFlavor::RhelLike => vec!["gettid", "poll"],
+                RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => {
+                    vec!["gettid", "poll", "sched_getaffinity"]
+                }
+            };
+            if arch == RuntimeSyscallArch::Aarch64 {
+                syscalls.push("ppoll");
             }
-        },
+            syscalls
+        }
         SyscallGroup::PythonRuntimeExtras => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &[
+            RuntimeSyscallFlavor::DebianUbuntu => vec![
                 "dup",
                 "dup2",
                 "getcwd",
@@ -2469,7 +2522,7 @@ fn syscall_group_expansion(
                 "readlink",
                 "sysinfo",
             ],
-            RuntimeSyscallFlavor::Arch => &[
+            RuntimeSyscallFlavor::Arch => vec![
                 "dup",
                 "dup2",
                 "getcwd",
@@ -2482,7 +2535,7 @@ fn syscall_group_expansion(
                 "pipe2",
                 "sysinfo",
             ],
-            RuntimeSyscallFlavor::RhelLike => &[
+            RuntimeSyscallFlavor::RhelLike => vec![
                 "dup",
                 "dup2",
                 "getcwd",
@@ -2494,7 +2547,7 @@ fn syscall_group_expansion(
                 "getuid",
                 "pipe2",
             ],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => &[
+            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => vec![
                 "dup",
                 "dup2",
                 "getcwd",
@@ -2508,134 +2561,147 @@ fn syscall_group_expansion(
                 "sysinfo",
             ],
         },
-        SyscallGroup::WasmtimeRuntimeExtras => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &[
-                "clock_nanosleep",
-                "dup",
-                "dup2",
-                "epoll_create1",
-                "epoll_ctl",
-                "epoll_wait",
-                "eventfd2",
-                "exit",
-                "fcntl",
-                "getdents64",
-                "getpriority",
-                "gettid",
-                "ioctl",
-                "madvise",
-                "memfd_create",
-                "mkdir",
-                "pipe2",
-                "poll",
-                "prctl",
-                "rename",
-                "sched_getaffinity",
-                "sched_yield",
-                "setpriority",
-                "socketpair",
-                "sysinfo",
-            ],
-            RuntimeSyscallFlavor::Arch => &[
-                "clock_nanosleep",
-                "dup",
-                "dup2",
-                "epoll_create1",
-                "epoll_ctl",
-                "epoll_wait",
-                "eventfd2",
-                "exit",
-                "fcntl",
-                "getdents64",
-                "getpriority",
-                "gettid",
-                "ioctl",
-                "madvise",
-                "memfd_create",
-                "mkdir",
-                "pipe2",
-                "poll",
-                "prctl",
-                "rename",
-                "sched_getaffinity",
-                "sched_yield",
-                "setpriority",
-                "socketpair",
-                "sysinfo",
-            ],
-            RuntimeSyscallFlavor::RhelLike => &[
-                "clock_nanosleep",
-                "dup",
-                "dup2",
-                "epoll_create1",
-                "epoll_ctl",
-                "epoll_wait",
-                "eventfd2",
-                "exit",
-                "fcntl",
-                "getdents64",
-                "getpriority",
-                "gettid",
-                "ioctl",
-                "madvise",
-                "mkdir",
-                "pipe2",
-                "poll",
-                "prctl",
-                "rename",
-                "sched_getaffinity",
-                "setpriority",
-                "socketpair",
-                "sysinfo",
-            ],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => &[
-                "clock_nanosleep",
-                "dup",
-                "dup2",
-                "epoll_create1",
-                "epoll_ctl",
-                "epoll_wait",
-                "eventfd2",
-                "exit",
-                "fcntl",
-                "getdents64",
-                "getpriority",
-                "gettid",
-                "ioctl",
-                "madvise",
-                "memfd_create",
-                "mkdir",
-                "pipe2",
-                "poll",
-                "prctl",
-                "rename",
-                "sched_getaffinity",
-                "sched_yield",
-                "setpriority",
-                "socketpair",
-                "sysinfo",
-            ],
-        },
+        SyscallGroup::WasmtimeRuntimeExtras => {
+            let mut syscalls = match flavor {
+                RuntimeSyscallFlavor::DebianUbuntu => vec![
+                    "clock_nanosleep",
+                    "dup",
+                    "dup2",
+                    "epoll_create1",
+                    "epoll_ctl",
+                    "epoll_wait",
+                    "eventfd2",
+                    "exit",
+                    "fcntl",
+                    "getdents64",
+                    "getpriority",
+                    "gettid",
+                    "ioctl",
+                    "madvise",
+                    "memfd_create",
+                    "mkdir",
+                    "pipe2",
+                    "poll",
+                    "prctl",
+                    "rename",
+                    "sched_getaffinity",
+                    "sched_yield",
+                    "setpriority",
+                    "socketpair",
+                    "sysinfo",
+                ],
+                RuntimeSyscallFlavor::Arch => vec![
+                    "clock_nanosleep",
+                    "dup",
+                    "dup2",
+                    "epoll_create1",
+                    "epoll_ctl",
+                    "epoll_wait",
+                    "eventfd2",
+                    "exit",
+                    "fcntl",
+                    "getdents64",
+                    "getpriority",
+                    "gettid",
+                    "ioctl",
+                    "madvise",
+                    "memfd_create",
+                    "mkdir",
+                    "pipe2",
+                    "poll",
+                    "prctl",
+                    "rename",
+                    "sched_getaffinity",
+                    "sched_yield",
+                    "setpriority",
+                    "socketpair",
+                    "sysinfo",
+                ],
+                RuntimeSyscallFlavor::RhelLike => vec![
+                    "clock_nanosleep",
+                    "dup",
+                    "dup2",
+                    "epoll_create1",
+                    "epoll_ctl",
+                    "epoll_wait",
+                    "eventfd2",
+                    "exit",
+                    "fcntl",
+                    "getdents64",
+                    "getpriority",
+                    "gettid",
+                    "ioctl",
+                    "madvise",
+                    "mkdir",
+                    "pipe2",
+                    "poll",
+                    "prctl",
+                    "rename",
+                    "sched_getaffinity",
+                    "setpriority",
+                    "socketpair",
+                    "sysinfo",
+                ],
+                RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => vec![
+                    "clock_nanosleep",
+                    "dup",
+                    "dup2",
+                    "epoll_create1",
+                    "epoll_ctl",
+                    "epoll_wait",
+                    "eventfd2",
+                    "exit",
+                    "fcntl",
+                    "getdents64",
+                    "getpriority",
+                    "gettid",
+                    "ioctl",
+                    "madvise",
+                    "memfd_create",
+                    "mkdir",
+                    "pipe2",
+                    "poll",
+                    "prctl",
+                    "rename",
+                    "sched_getaffinity",
+                    "sched_yield",
+                    "setpriority",
+                    "socketpair",
+                    "sysinfo",
+                ],
+            };
+            if arch == RuntimeSyscallArch::Aarch64 {
+                syscalls.extend([
+                    "epoll_pwait",
+                    "getpid",
+                    "membarrier",
+                    "mkdirat",
+                    "ppoll",
+                    "renameat",
+                ]);
+            }
+            syscalls
+        }
         SyscallGroup::CompilerExec => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &["execve", "execveat"],
-            RuntimeSyscallFlavor::Arch => &["execve", "execveat"],
-            RuntimeSyscallFlavor::RhelLike => &["execve"],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => &["execve"],
+            RuntimeSyscallFlavor::DebianUbuntu => vec!["execve", "execveat"],
+            RuntimeSyscallFlavor::Arch => vec!["execve", "execveat"],
+            RuntimeSyscallFlavor::RhelLike => vec!["execve"],
+            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => vec!["execve"],
         },
         SyscallGroup::CompilerExtras => match flavor {
-            RuntimeSyscallFlavor::DebianUbuntu => &[
+            RuntimeSyscallFlavor::DebianUbuntu => vec![
                 "dup", "dup2", "getcwd", "getegid", "geteuid", "getgid", "gettid", "getuid",
                 "ioctl", "pipe2", "sysinfo",
             ],
-            RuntimeSyscallFlavor::Arch => &[
+            RuntimeSyscallFlavor::Arch => vec![
                 "dup", "dup2", "getcwd", "getegid", "geteuid", "getgid", "gettid", "getuid",
                 "ioctl", "pipe2", "sysinfo",
             ],
-            RuntimeSyscallFlavor::RhelLike => &[
+            RuntimeSyscallFlavor::RhelLike => vec![
                 "dup", "dup2", "getcwd", "getegid", "geteuid", "getgid", "gettid", "getuid",
                 "ioctl", "pipe2",
             ],
-            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => &[
+            RuntimeSyscallFlavor::Generic | RuntimeSyscallFlavor::Auto => vec![
                 "dup", "dup2", "getcwd", "getegid", "geteuid", "getgid", "gettid", "getuid",
                 "ioctl", "pipe2", "sysinfo",
             ],
@@ -2664,20 +2730,36 @@ pub fn debug_seccomp_profile_group_names(policy: &str) -> Vec<&'static str> {
 }
 
 pub fn debug_seccomp_profile_syscalls(policy: &str) -> Vec<&'static str> {
-    debug_seccomp_profile_syscalls_for_flavor(policy, RuntimeSyscallFlavor::Auto)
+    debug_seccomp_profile_syscalls_for_target(
+        policy,
+        RuntimeSyscallFlavor::Auto,
+        RuntimeSyscallArch::Auto,
+    )
 }
 
 pub fn debug_seccomp_profile_normalized_syscalls(policy: &str) -> Vec<&'static str> {
-    debug_seccomp_profile_normalized_syscalls_for_flavor(policy, RuntimeSyscallFlavor::Auto)
+    debug_seccomp_profile_normalized_syscalls_for_target(
+        policy,
+        RuntimeSyscallFlavor::Auto,
+        RuntimeSyscallArch::Auto,
+    )
 }
 
 pub fn debug_seccomp_profile_syscalls_for_flavor(
     policy: &str,
     flavor: RuntimeSyscallFlavor,
 ) -> Vec<&'static str> {
+    debug_seccomp_profile_syscalls_for_target(policy, flavor, RuntimeSyscallArch::Auto)
+}
+
+pub fn debug_seccomp_profile_syscalls_for_target(
+    policy: &str,
+    flavor: RuntimeSyscallFlavor,
+    arch: RuntimeSyscallArch,
+) -> Vec<&'static str> {
     seccomp_profile_syscalls(
         seccomp_profile_for_policy(policy),
-        resolve_runtime_syscall_flavor(flavor),
+        resolve_runtime_syscall_profile(flavor, arch),
     )
 }
 
@@ -2685,7 +2767,15 @@ pub fn debug_seccomp_profile_normalized_syscalls_for_flavor(
     policy: &str,
     flavor: RuntimeSyscallFlavor,
 ) -> Vec<&'static str> {
-    let mut normalized = debug_seccomp_profile_syscalls_for_flavor(policy, flavor)
+    debug_seccomp_profile_normalized_syscalls_for_target(policy, flavor, RuntimeSyscallArch::Auto)
+}
+
+pub fn debug_seccomp_profile_normalized_syscalls_for_target(
+    policy: &str,
+    flavor: RuntimeSyscallFlavor,
+    arch: RuntimeSyscallArch,
+) -> Vec<&'static str> {
+    let mut normalized = debug_seccomp_profile_syscalls_for_target(policy, flavor, arch)
         .into_iter()
         .map(normalize_syscall_name)
         .collect::<Vec<_>>();
@@ -2695,13 +2785,38 @@ pub fn debug_seccomp_profile_normalized_syscalls_for_flavor(
 }
 
 pub fn debug_detected_runtime_syscall_flavor() -> RuntimeSyscallFlavor {
-    resolve_runtime_syscall_flavor(RuntimeSyscallFlavor::Auto)
+    debug_detected_runtime_syscall_profile().flavor
+}
+
+pub fn debug_detected_runtime_syscall_arch() -> RuntimeSyscallArch {
+    debug_detected_runtime_syscall_profile().arch
+}
+
+pub fn debug_detected_runtime_syscall_profile() -> RuntimeSyscallProfile {
+    resolve_runtime_syscall_profile(RuntimeSyscallFlavor::Auto, RuntimeSyscallArch::Auto)
 }
 
 fn resolve_runtime_syscall_flavor(flavor: RuntimeSyscallFlavor) -> RuntimeSyscallFlavor {
     match flavor {
         RuntimeSyscallFlavor::Auto => detect_runtime_syscall_flavor(),
         other => other,
+    }
+}
+
+fn resolve_runtime_syscall_arch(arch: RuntimeSyscallArch) -> RuntimeSyscallArch {
+    match arch {
+        RuntimeSyscallArch::Auto => detect_runtime_syscall_arch(),
+        other => other,
+    }
+}
+
+fn resolve_runtime_syscall_profile(
+    flavor: RuntimeSyscallFlavor,
+    arch: RuntimeSyscallArch,
+) -> RuntimeSyscallProfile {
+    RuntimeSyscallProfile {
+        flavor: resolve_runtime_syscall_flavor(flavor),
+        arch: resolve_runtime_syscall_arch(arch),
     }
 }
 
@@ -2734,11 +2849,25 @@ fn detect_runtime_syscall_flavor() -> RuntimeSyscallFlavor {
     RuntimeSyscallFlavor::Generic
 }
 
+fn detect_runtime_syscall_arch() -> RuntimeSyscallArch {
+    match std::env::consts::ARCH {
+        "x86_64" => RuntimeSyscallArch::X86_64,
+        "aarch64" => RuntimeSyscallArch::Aarch64,
+        _ => RuntimeSyscallArch::Other,
+    }
+}
+
 #[cfg(test)]
-fn syscall_group_aliases(group: SyscallGroup) -> &'static [&'static str] {
+fn syscall_group_aliases(group: SyscallGroup) -> Vec<&'static str> {
     match group {
-        SyscallGroup::FileStatCompat => &["fstat", "newfstat", "newfstatat", "statx"],
-        _ => syscall_group_expansion(group, RuntimeSyscallFlavor::Generic),
+        SyscallGroup::FileStatCompat => vec!["fstat", "newfstat", "newfstatat", "statx"],
+        _ => syscall_group_expansion(
+            group,
+            RuntimeSyscallProfile {
+                flavor: RuntimeSyscallFlavor::Generic,
+                arch: RuntimeSyscallArch::X86_64,
+            },
+        ),
     }
 }
 
@@ -2805,8 +2934,9 @@ fn build_spj_execution_spec(spj: &RuntimeSpjConfig) -> AppResult<SpjExecutionSpe
 mod tests {
     use super::{
         compiler_seccomp_policy_string, default_runtime_worker_groups,
-        seccomp_policy_string_with_mode, InMemoryRuntimeTaskQueue, RuntimeNodeHealthStatus,
-        RuntimeRouteBinding, RuntimeSeccompMode, RuntimeTaskQueue, RuntimeTaskService,
+        seccomp_policy_string_with_mode, seccomp_policy_string_with_mode_and_arch,
+        InMemoryRuntimeTaskQueue, RuntimeNodeHealthStatus, RuntimeRouteBinding, RuntimeSeccompMode,
+        RuntimeSyscallArch, RuntimeSyscallProfile, RuntimeTaskQueue, RuntimeTaskService,
         RuntimeWorkerGroup,
     };
     use crate::planning::{
@@ -2957,6 +3087,7 @@ mod tests {
                 "/usr/bin/nsjail",
                 RuntimeSeccompMode::Log,
                 RuntimeSyscallFlavor::Generic,
+                RuntimeSyscallArch::X86_64,
             )),
             Arc::new(InMemoryRuntimeTaskQueue::default()),
             Arc::new(super::NoopRuntimeEventObserver),
@@ -2983,6 +3114,7 @@ mod tests {
                 "/usr/bin/nsjail",
                 RuntimeSeccompMode::Log,
                 RuntimeSyscallFlavor::Generic,
+                RuntimeSyscallArch::X86_64,
             )),
             Arc::new(InMemoryRuntimeTaskQueue::default()),
             Arc::new(super::NoopRuntimeEventObserver),
@@ -3202,6 +3334,7 @@ mod tests {
             "/usr/bin/nsjail",
             RuntimeSeccompMode::Log,
             RuntimeSyscallFlavor::Generic,
+            RuntimeSyscallArch::X86_64,
         );
         let task = RuntimeTask {
             task_id: "task-rust-wasm-smoke".to_owned(),
@@ -3284,6 +3417,7 @@ fn main() {
             "/usr/bin/nsjail",
             RuntimeSeccompMode::Log,
             RuntimeSyscallFlavor::Generic,
+            RuntimeSyscallArch::X86_64,
         );
         let task = RuntimeTask {
             task_id: "task-cpp-wasm-smoke".to_owned(),
@@ -3814,7 +3948,10 @@ fn main() {
             RuntimeSeccompMode::Log,
             RuntimeSyscallFlavor::Generic,
         );
-        let compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallFlavor::Generic);
+        let compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallProfile {
+            flavor: RuntimeSyscallFlavor::Generic,
+            arch: RuntimeSyscallArch::X86_64,
+        });
 
         assert!(!cpp_policy.contains("execve"));
         assert!(!rust_policy.contains("execve"));
@@ -4053,8 +4190,14 @@ fn main() {
             RuntimeSeccompMode::Log,
             RuntimeSyscallFlavor::RhelLike,
         );
-        let generic_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallFlavor::Generic);
-        let rhel_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallFlavor::RhelLike);
+        let generic_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallProfile {
+            flavor: RuntimeSyscallFlavor::Generic,
+            arch: RuntimeSyscallArch::X86_64,
+        });
+        let rhel_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallProfile {
+            flavor: RuntimeSyscallFlavor::RhelLike,
+            arch: RuntimeSyscallArch::X86_64,
+        });
 
         assert!(generic_cpp_policy.contains("readv"));
         assert!(generic_cpp_policy.contains("writev"));
@@ -4069,11 +4212,22 @@ fn main() {
 
     #[test]
     fn runtime_syscall_flavor_expands_compiler_exec_by_linux_family() {
-        let generic_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallFlavor::Generic);
-        let debian_compiler_policy =
-            compiler_seccomp_policy_string(RuntimeSyscallFlavor::DebianUbuntu);
-        let arch_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallFlavor::Arch);
-        let rhel_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallFlavor::RhelLike);
+        let generic_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallProfile {
+            flavor: RuntimeSyscallFlavor::Generic,
+            arch: RuntimeSyscallArch::X86_64,
+        });
+        let debian_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallProfile {
+            flavor: RuntimeSyscallFlavor::DebianUbuntu,
+            arch: RuntimeSyscallArch::X86_64,
+        });
+        let arch_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallProfile {
+            flavor: RuntimeSyscallFlavor::Arch,
+            arch: RuntimeSyscallArch::X86_64,
+        });
+        let rhel_compiler_policy = compiler_seccomp_policy_string(RuntimeSyscallProfile {
+            flavor: RuntimeSyscallFlavor::RhelLike,
+            arch: RuntimeSyscallArch::X86_64,
+        });
 
         assert!(generic_compiler_policy.contains("execve"));
         assert!(!generic_compiler_policy.contains("execveat"));
@@ -4081,6 +4235,41 @@ fn main() {
         assert!(arch_compiler_policy.contains("execveat"));
         assert!(rhel_compiler_policy.contains("execve"));
         assert!(!rhel_compiler_policy.contains("execveat"));
+    }
+
+    #[test]
+    fn runtime_syscall_arch_expands_rust_and_wasm_profiles_for_aarch64() {
+        let rust_x64_policy = seccomp_policy_string_with_mode_and_arch(
+            "rust_native_default",
+            RuntimeSeccompMode::Log,
+            RuntimeSyscallFlavor::DebianUbuntu,
+            RuntimeSyscallArch::X86_64,
+        );
+        let rust_arm_policy = seccomp_policy_string_with_mode_and_arch(
+            "rust_native_default",
+            RuntimeSeccompMode::Log,
+            RuntimeSyscallFlavor::DebianUbuntu,
+            RuntimeSyscallArch::Aarch64,
+        );
+        let wasm_x64_policy = seccomp_policy_string_with_mode_and_arch(
+            "wasm_default",
+            RuntimeSeccompMode::Log,
+            RuntimeSyscallFlavor::DebianUbuntu,
+            RuntimeSyscallArch::X86_64,
+        );
+        let wasm_arm_policy = seccomp_policy_string_with_mode_and_arch(
+            "wasm_default",
+            RuntimeSeccompMode::Log,
+            RuntimeSyscallFlavor::DebianUbuntu,
+            RuntimeSyscallArch::Aarch64,
+        );
+
+        assert!(!rust_x64_policy.contains("ppoll"));
+        assert!(rust_arm_policy.contains("ppoll"));
+        assert!(!wasm_x64_policy.contains("epoll_pwait"));
+        assert!(wasm_arm_policy.contains("epoll_pwait"));
+        assert!(wasm_arm_policy.contains("membarrier"));
+        assert!(wasm_arm_policy.contains("renameat"));
     }
 
     fn runtime_task(task_id: &str, queue: &str, lane: &str) -> RuntimeTask {
@@ -4161,6 +4350,7 @@ fn main() {
             "/usr/bin/nsjail",
             seccomp_mode,
             RuntimeSyscallFlavor::Generic,
+            RuntimeSyscallArch::X86_64,
         );
         let artifacts = worker.prepare(task).expect("artifacts should prepare");
         let outcome = worker

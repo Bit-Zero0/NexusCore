@@ -27,6 +27,7 @@ pub struct RuntimeConfig {
     pub node_id: String,
     pub seccomp_mode: RuntimeSeccompMode,
     pub syscall_flavor: RuntimeSyscallFlavor,
+    pub syscall_arch: RuntimeSyscallArch,
     pub queue_backend: RuntimeQueueBackend,
     pub rabbitmq: RabbitMqRuntimeConfig,
     pub worker_groups: Vec<RuntimeWorkerGroupConfig>,
@@ -124,6 +125,28 @@ impl RuntimeSyscallFlavor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeSyscallArch {
+    Auto,
+    X86_64,
+    Aarch64,
+    Other,
+}
+
+impl RuntimeSyscallArch {
+    fn from_env(value: &str) -> AppResult<Self> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "x86_64" => Ok(Self::X86_64),
+            "aarch64" => Ok(Self::Aarch64),
+            "other" => Ok(Self::Other),
+            other => Err(AppError::InvalidConfig(format!(
+                "NEXUS_RUNTIME_SYSCALL_ARCH must be 'auto', 'x86_64', 'aarch64', or 'other', got: {other}"
+            ))),
+        }
+    }
+}
+
 impl RuntimeSeccompMode {
     fn from_env(value: &str) -> AppResult<Self> {
         match value {
@@ -213,6 +236,9 @@ impl AppConfig {
                 )?,
                 syscall_flavor: RuntimeSyscallFlavor::from_env(
                     &env::var("NEXUS_RUNTIME_SYSCALL_FLAVOR").unwrap_or_else(|_| "auto".to_owned()),
+                )?,
+                syscall_arch: RuntimeSyscallArch::from_env(
+                    &env::var("NEXUS_RUNTIME_SYSCALL_ARCH").unwrap_or_else(|_| "auto".to_owned()),
                 )?,
                 queue_backend: RuntimeQueueBackend::from_env(
                     &env::var("NEXUS_RUNTIME_QUEUE_BACKEND")

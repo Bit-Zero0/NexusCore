@@ -5,7 +5,7 @@ use axum::{extract::Query, http::Method, routing::get, Json, Router};
 use nexus_auth::build_dev_auth_service;
 use nexus_config::{
     AppConfig, OjRepositoryMode, RuntimeQueueBackend as ConfigRuntimeQueueBackend,
-    RuntimeSeccompMode as ConfigRuntimeSeccompMode,
+    RuntimeSeccompMode as ConfigRuntimeSeccompMode, RuntimeSyscallArch as ConfigRuntimeSyscallArch,
     RuntimeSyscallFlavor as ConfigRuntimeSyscallFlavor, RuntimeWorkerGroupConfig,
 };
 use nexus_oj::{
@@ -16,8 +16,8 @@ use nexus_runtime::{
     build_default_runtime_catalog, build_rabbitmq_runtime_queue,
     build_router as build_runtime_router, build_runtime_queue, RabbitMqQueueConfig,
     RuntimeEventObserver, RuntimeNodeHealthStatus, RuntimeNodeStatus, RuntimeQueueBackend,
-    RuntimeRouteBinding, RuntimeSeccompMode, RuntimeSyscallFlavor, RuntimeTaskEvent,
-    RuntimeTaskService, RuntimeWorker, RuntimeWorkerGroup,
+    RuntimeRouteBinding, RuntimeSeccompMode, RuntimeSyscallArch, RuntimeSyscallFlavor,
+    RuntimeTaskEvent, RuntimeTaskService, RuntimeWorker, RuntimeWorkerGroup,
 };
 use nexus_shared::HealthStatus;
 use nexus_storage::PostgresPoolFactory;
@@ -127,6 +127,7 @@ pub async fn build_gateway_services(
             config.runtime.nsjail_path.clone(),
             map_runtime_seccomp_mode(config.runtime.seccomp_mode),
             map_runtime_syscall_flavor(config.runtime.syscall_flavor),
+            map_runtime_syscall_arch(config.runtime.syscall_arch),
         )),
         build_runtime_queue_from_config(config).await?,
         runtime_observer,
@@ -149,6 +150,15 @@ fn map_runtime_syscall_flavor(mode: ConfigRuntimeSyscallFlavor) -> RuntimeSyscal
         ConfigRuntimeSyscallFlavor::DebianUbuntu => RuntimeSyscallFlavor::DebianUbuntu,
         ConfigRuntimeSyscallFlavor::Arch => RuntimeSyscallFlavor::Arch,
         ConfigRuntimeSyscallFlavor::RhelLike => RuntimeSyscallFlavor::RhelLike,
+    }
+}
+
+fn map_runtime_syscall_arch(arch: ConfigRuntimeSyscallArch) -> RuntimeSyscallArch {
+    match arch {
+        ConfigRuntimeSyscallArch::Auto => RuntimeSyscallArch::Auto,
+        ConfigRuntimeSyscallArch::X86_64 => RuntimeSyscallArch::X86_64,
+        ConfigRuntimeSyscallArch::Aarch64 => RuntimeSyscallArch::Aarch64,
+        ConfigRuntimeSyscallArch::Other => RuntimeSyscallArch::Other,
     }
 }
 

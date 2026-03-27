@@ -7,11 +7,11 @@
 这份文档记录 `nexus-runtime` 当前的 Linux syscall 兼容档位设计，用于说明：
 
 - 为什么不能只维护一份平铺 syscall allowlist
-- 当前已经 flavor 化到什么程度
-- 各 flavor 之间的主要差异
+- 当前已经扩展到什么程度
+- 各 Linux family 与 architecture 组合之间的主要差异
 - 现在的边界和后续该怎么继续推进
 
-## 当前支持的 flavor
+## 当前支持的 Linux family
 
 配置项：`NEXUS_RUNTIME_SYSCALL_FLAVOR`
 
@@ -35,6 +35,36 @@
 - Arch / Manjaro -> `arch`
 - Fedora / RHEL / Rocky / Alma / CentOS -> `rhel_like`
 - 其他情况 -> `generic`
+
+## 当前支持的 architecture
+
+配置项：`NEXUS_RUNTIME_SYSCALL_ARCH`
+
+可选值：
+
+- `auto`
+- `x86_64`
+- `aarch64`
+- `other`
+
+`auto` 模式会根据当前运行架构自动解析：
+
+- `x86_64` -> `x86_64`
+- `aarch64` -> `aarch64`
+- 其他情况 -> `other`
+
+当前 seccomp 生成逻辑已经不是只看 `flavor`，而是同时看：
+
+- Linux family
+- architecture
+
+也就是说，现在的真实判断维度是：
+
+- `debian_ubuntu + x86_64`
+- `debian_ubuntu + aarch64`
+- `rhel_like + x86_64`
+- `rhel_like + aarch64`
+- 以及其他保守组合
 
 ## 当前已经 flavor 化的 syscall 组
 
@@ -241,6 +271,19 @@
 - `rhel_like` 的裁剪是保守策略，不代表这些 syscall 永远不需要
 - 是否回补，必须以实机采样为准
 
+架构补充：
+
+- 当 `arch = aarch64` 时，会额外显式带：
+  - `epoll_pwait`
+  - `getpid`
+  - `membarrier`
+  - `mkdirat`
+  - `ppoll`
+  - `renameat`
+
+- 这批规则来自当前已经采到的 `Oracle Ubuntu ARM64` 样本
+- 现阶段先按 `aarch64` 收口，不直接把它们并入所有 `debian_ubuntu`
+
 ### 7. `process_lifecycle_compat`
 
 归一化语义：
@@ -302,6 +345,13 @@
 
 - `rhel_like` 目前不主动带 `sched_getaffinity`
 - 这仍然是保守策略，后续是否回补看实机采样
+
+架构补充：
+
+- 当 `arch = aarch64` 时，当前会额外显式带：
+  - `ppoll`
+
+- 这条也是基于当前 `Oracle Ubuntu ARM64` 实机采样先补上的
 
 ### 9. `cpp_runtime_extras`
 
@@ -478,7 +528,7 @@
 
 ```bash
 cargo run -q --manifest-path ./Cargo.toml \
-  -p nexus-runtime --bin seccomp_profiles -- --flavor=debian_ubuntu cpp_native_default
+  -p nexus-runtime --bin seccomp_profiles -- --flavor=debian_ubuntu --arch=aarch64 cpp_native_default
 ```
 
 ### 对比采样与当前 profile
@@ -500,13 +550,16 @@ bash scripts/compare_runtime_seccomp_profiles.sh /tmp/nexus-seccomp-compare --al
 - `norm_missing`
 - `norm_extra`
 
-以及当前用于展开 seccomp 的 `flavor`。
+以及当前用于展开 seccomp 的：
+
+- `flavor`
+- `arch`
 
 ## 当前覆盖范围
 
 可以把目前状态理解为：
 
-- 已经从“单 host 展开”升级成“可配置 Linux flavor 展开”
+- 已经从“单 host 展开”升级成“可配置 Linux family + architecture 展开”
 - 已经有：
   - 配置入口
   - 自动检测
@@ -521,17 +574,19 @@ bash scripts/compare_runtime_seccomp_profiles.sh /tmp/nexus-seccomp-compare --al
 
 ## 下一步建议
 
-1. 在至少一台 Debian/Ubuntu 和一台 RHEL-like 机器上各跑一次采样。
-2. 基于真实 diff 决定是否继续 flavor 化：
+1. 在至少一台 Debian/Ubuntu x86_64 和一台 RHEL-like x86_64 机器上各跑一次采样。
+2. 把当前这台 `Oracle Ubuntu ARM64` 样本单独归档，不要和通用 Ubuntu x86_64 混用。
+3. 基于真实 diff 决定是否继续细化：
    - `wasmtime_runtime_extras` 的更细子组
    - `compiler_extras` 的编译器级子组
    - `compiler_exec` 在 `rhel_like` 是否应回补 `execveat`
    - `runtime_core` 里 `readv/writev` 是否应在 `rhel_like` 回补
-3. 给 `compare_runtime_seccomp_profiles.sh` 增加多 flavor 批量输出模式。
-4. 最后再决定默认 `auto` 是否足够稳，还是需要在生产环境明确指定 flavor。
+   - `aarch64` 是否还需要额外的 `wasmtime` syscall
+4. 给 `compare_runtime_seccomp_profiles.sh` 增加主机元信息归档能力。
+5. 最后再决定默认 `auto` 是否足够稳，还是需要在生产环境明确指定 `flavor + arch`。
 
 ## 实机采样计划
 
 多发行版实机采样的执行计划已经单独整理在：
 
-- [Linux_多发行版_Syscall_实机采样计划.md](/home/fmy/Nexus_OJ/NexusCode/Linux_多发行版_Syscall_实机采样计划.md)
+- [Linux_多发行版_Syscall_实机采样计划.md](/home/fmy/Nexus_OJ/NexusCore/Linux_多发行版_Syscall_实机采样计划.md)
