@@ -477,20 +477,20 @@
 ### 导出当前 seccomp profile
 
 ```bash
-cargo run -q --manifest-path /home/fmy/Nexus_OJ/NexusCode/Cargo.toml \
+cargo run -q --manifest-path ./Cargo.toml \
   -p nexus-runtime --bin seccomp_profiles -- --flavor=debian_ubuntu cpp_native_default
 ```
 
 ### 对比采样与当前 profile
 
 ```bash
-bash /home/fmy/Nexus_OJ/NexusCode/scripts/compare_runtime_seccomp_profiles.sh /tmp/nexus-seccomp-compare debian_ubuntu
+bash scripts/compare_runtime_seccomp_profiles.sh /tmp/nexus-seccomp-compare debian_ubuntu
 ```
 
 也可以直接批量跑全部 flavor：
 
 ```bash
-bash /home/fmy/Nexus_OJ/NexusCode/scripts/compare_runtime_seccomp_profiles.sh /tmp/nexus-seccomp-compare --all-flavors
+bash scripts/compare_runtime_seccomp_profiles.sh /tmp/nexus-seccomp-compare --all-flavors
 ```
 
 输出会包含：

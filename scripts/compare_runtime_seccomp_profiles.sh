@@ -17,6 +17,8 @@ ROOT_DIR="${1:-/tmp/nexus-runtime-seccomp-compare}"
 MODE="${2:-auto}"
 BASELINE_DIR="$ROOT_DIR/baseline"
 REPORT_PATH="$ROOT_DIR/baseline_report.txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ "$ROOT_DIR" == "--help" || "$ROOT_DIR" == "-h" || "$MODE" == "--help" || "$MODE" == "-h" ]]; then
     usage
@@ -29,7 +31,7 @@ run_compare() {
     local flavor="$1"
     local profiles_path="$ROOT_DIR/seccomp_profiles_${flavor}.json"
 
-    cargo run -q --manifest-path /home/fmy/Nexus_OJ/NexusCode/Cargo.toml \
+    cargo run -q --manifest-path "$REPO_DIR/Cargo.toml" \
         -p nexus-runtime --bin seccomp_profiles -- --json --flavor="$flavor" >"$profiles_path"
 
     python3 - "$REPORT_PATH" "$profiles_path" <<'PY'
@@ -100,7 +102,7 @@ for label, policy in policy_for_label.items():
 PY
 }
 
-if ! bash /home/fmy/Nexus_OJ/NexusCode/scripts/collect_runtime_syscall_baseline.sh "$BASELINE_DIR" | tee "$REPORT_PATH" >/dev/null; then
+if ! bash "$REPO_DIR/scripts/collect_runtime_syscall_baseline.sh" "$BASELINE_DIR" | tee "$REPORT_PATH" >/dev/null; then
     echo "failed to collect runtime syscall baseline" >&2
     echo "hint: run this script on a host where strace/ptrace is allowed, then compare again" >&2
     exit 1

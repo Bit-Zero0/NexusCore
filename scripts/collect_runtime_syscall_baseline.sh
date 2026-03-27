@@ -10,8 +10,25 @@ require_tool() {
 
 require_tool strace
 require_tool rustup
-require_tool /usr/bin/g++
 require_tool python3
+
+if command -v g++ >/dev/null 2>&1; then
+    CXX="$(command -v g++)"
+elif [[ -x /usr/bin/g++ ]]; then
+    CXX="/usr/bin/g++"
+else
+    echo "missing required tool: g++" >&2
+    exit 1
+fi
+
+if command -v wasmtime >/dev/null 2>&1; then
+    WASMTIME_BIN="$(command -v wasmtime)"
+elif [[ -x /root/.wasmtime/bin/wasmtime ]]; then
+    WASMTIME_BIN="/root/.wasmtime/bin/wasmtime"
+else
+    echo "missing required tool: wasmtime" >&2
+    exit 1
+fi
 
 ROOT_DIR="${1:-/tmp/nexus-runtime-syscall-baseline}"
 mkdir -p "$ROOT_DIR"
@@ -58,7 +75,7 @@ fn main() {
 }
 EOF
 
-/usr/bin/g++ -std=c++20 -O2 -pipe -o "$CPP_BIN" "$CPP_SRC"
+"$CXX" -std=c++20 -O2 -pipe -o "$CPP_BIN" "$CPP_SRC"
 "$(rustup which rustc)" -O -o "$RUST_BIN" "$RUST_SRC"
 "$(rustup which rustc)" --target wasm32-wasip1 -O -o "$WASM_BIN" "$WASM_SRC"
 
@@ -74,7 +91,7 @@ trace_run() {
 
 trace_run "$CPP_TRACE" "$CPP_BIN"
 trace_run "$RUST_TRACE" "$RUST_BIN"
-trace_run "$WASM_TRACE" /root/.wasmtime/bin/wasmtime run -W max-memory-size=268435456 -W timeout=1000ms "$WASM_BIN"
+trace_run "$WASM_TRACE" "$WASMTIME_BIN" run -W max-memory-size=268435456 -W timeout=1000ms "$WASM_BIN"
 
 python3 - "$CPP_TRACE" "$RUST_TRACE" "$WASM_TRACE" <<'PY'
 import re

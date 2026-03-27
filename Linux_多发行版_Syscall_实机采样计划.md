@@ -59,13 +59,13 @@ rustc --version
 在目标主机上进入仓库目录：
 
 ```bash
-cd /home/fmy/Nexus_OJ/NexusCode
+cd /root/NexusCore
 ```
 
 先跑单 flavor 对比：
 
 ```bash
-bash /home/fmy/Nexus_OJ/NexusCode/scripts/compare_runtime_seccomp_profiles.sh \
+bash scripts/compare_runtime_seccomp_profiles.sh \
   /tmp/nexus-seccomp-compare \
   auto
 ```
@@ -73,7 +73,7 @@ bash /home/fmy/Nexus_OJ/NexusCode/scripts/compare_runtime_seccomp_profiles.sh \
 如果要显式指定 flavor：
 
 ```bash
-bash /home/fmy/Nexus_OJ/NexusCode/scripts/compare_runtime_seccomp_profiles.sh \
+bash scripts/compare_runtime_seccomp_profiles.sh \
   /tmp/nexus-seccomp-compare \
   debian_ubuntu
 ```
@@ -90,7 +90,7 @@ bash /home/fmy/Nexus_OJ/NexusCode/scripts/compare_runtime_seccomp_profiles.sh \
 当前脚本已经支持批量模式：
 
 ```bash
-bash /home/fmy/Nexus_OJ/NexusCode/scripts/compare_runtime_seccomp_profiles.sh \
+bash scripts/compare_runtime_seccomp_profiles.sh \
   /tmp/nexus-seccomp-compare \
   --all-flavors
 ```
