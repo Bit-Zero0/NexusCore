@@ -2676,6 +2676,7 @@ fn syscall_group_expansion(
                     "getpid",
                     "membarrier",
                     "mkdirat",
+                    "mremap",
                     "ppoll",
                     "renameat",
                 ]);
@@ -4269,6 +4270,7 @@ fn main() {
         assert!(!wasm_x64_policy.contains("epoll_pwait"));
         assert!(wasm_arm_policy.contains("epoll_pwait"));
         assert!(wasm_arm_policy.contains("membarrier"));
+        assert!(wasm_arm_policy.contains("mremap"));
         assert!(wasm_arm_policy.contains("renameat"));
     }
 
