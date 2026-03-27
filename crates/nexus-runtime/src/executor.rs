@@ -3518,14 +3518,15 @@ fn main() {
         ))
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Completed
-        ));
+        assert!(
+            matches!(outcome.final_status, RuntimeTaskLifecycleStatus::Completed),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::Accepted
-        ));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
     }
 
     #[tokio::test]
@@ -3554,14 +3555,15 @@ int main() {
         ))
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Completed
-        ));
+        assert!(
+            matches!(outcome.final_status, RuntimeTaskLifecycleStatus::Completed),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
         assert!(matches!(
             outcome.cases[0].status,
             super::RuntimeCaseFinalStatus::Accepted
-        ));
+        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
     }
 
     #[tokio::test]
@@ -3901,7 +3903,10 @@ fn main() {
             "unexpected outcome:\n{}",
             outcome_debug(&outcome)
         );
-        let compile = outcome.compile.expect("compile outcome should exist");
+        let compile = outcome
+            .compile
+            .as_ref()
+            .expect("compile outcome should exist");
         assert!(matches!(compile.status, RuntimeStageStatus::Failed));
         assert_eq!(
             compile.failure_kind,
