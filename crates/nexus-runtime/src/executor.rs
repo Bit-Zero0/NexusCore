@@ -3081,14 +3081,15 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_task_service_exposes_started_worker_groups() {
+        let nsjail = detect_nsjail_binary().unwrap_or_else(|| "/usr/bin/nsjail".to_owned());
         let service = RuntimeTaskService::with_queue(
             Arc::new(RuntimeWorker::new(
                 RuntimeLanguageCatalog::default(),
                 "/tmp/nexuscode-runtime-test",
-                "/usr/bin/nsjail",
+                nsjail,
                 RuntimeSeccompMode::Log,
                 RuntimeSyscallFlavor::Generic,
-                RuntimeSyscallArch::X86_64,
+                current_test_arch(),
             )),
             Arc::new(InMemoryRuntimeTaskQueue::default()),
             Arc::new(super::NoopRuntimeEventObserver),
@@ -3108,14 +3109,15 @@ mod tests {
 
     #[test]
     fn runtime_task_service_exposes_registered_node_status() {
+        let nsjail = detect_nsjail_binary().unwrap_or_else(|| "/usr/bin/nsjail".to_owned());
         let service = RuntimeTaskService::with_queue(
             Arc::new(RuntimeWorker::new(
                 RuntimeLanguageCatalog::default(),
                 "/tmp/nexuscode-runtime-test",
-                "/usr/bin/nsjail",
+                nsjail,
                 RuntimeSeccompMode::Log,
                 RuntimeSyscallFlavor::Generic,
-                RuntimeSyscallArch::X86_64,
+                current_test_arch(),
             )),
             Arc::new(InMemoryRuntimeTaskQueue::default()),
             Arc::new(super::NoopRuntimeEventObserver),
@@ -3328,14 +3330,15 @@ mod tests {
             eprintln!("skipping rust wasm smoke test: missing wasmtime or wasm32-wasip1 target");
             return;
         }
+        let nsjail = detect_nsjail_binary().unwrap_or_else(|| "/usr/bin/nsjail".to_owned());
 
         let worker = RuntimeWorker::new(
             crate::build_default_runtime_catalog(),
             unique_test_workdir("wasm-smoke"),
-            "/usr/bin/nsjail",
+            nsjail,
             RuntimeSeccompMode::Log,
             RuntimeSyscallFlavor::Generic,
-            RuntimeSyscallArch::X86_64,
+            current_test_arch(),
         );
         let task = RuntimeTask {
             task_id: "task-rust-wasm-smoke".to_owned(),
@@ -3411,14 +3414,15 @@ fn main() {
             eprintln!("skipping cpp wasm smoke test: missing wasmtime or clang++-17");
             return;
         }
+        let nsjail = detect_nsjail_binary().unwrap_or_else(|| "/usr/bin/nsjail".to_owned());
 
         let worker = RuntimeWorker::new(
             crate::build_default_runtime_catalog(),
             unique_test_workdir("cpp-wasm-smoke"),
-            "/usr/bin/nsjail",
+            nsjail,
             RuntimeSeccompMode::Log,
             RuntimeSyscallFlavor::Generic,
-            RuntimeSyscallArch::X86_64,
+            current_test_arch(),
         );
         let task = RuntimeTask {
             task_id: "task-cpp-wasm-smoke".to_owned(),
@@ -3490,7 +3494,7 @@ int main() {
 
     #[tokio::test]
     async fn rust_nsjail_wasm_submission_executes_end_to_end_when_toolchain_is_available() {
-        if !rust_wasm_toolchain_available() || !Path::new("/usr/bin/nsjail").exists() {
+        if !rust_wasm_toolchain_available() || detect_nsjail_binary().is_none() {
             eprintln!("skipping rust nsjail_wasm smoke test: missing nsjail or wasm toolchain");
             return;
         }
@@ -3526,7 +3530,7 @@ fn main() {
 
     #[tokio::test]
     async fn cpp_nsjail_wasm_submission_executes_end_to_end_when_toolchain_is_available() {
-        if !cpp_wasm_toolchain_available() || !Path::new("/usr/bin/nsjail").exists() {
+        if !cpp_wasm_toolchain_available() || detect_nsjail_binary().is_none() {
             eprintln!("skipping cpp nsjail_wasm smoke test: missing nsjail or wasm toolchain");
             return;
         }
@@ -4346,13 +4350,15 @@ fn main() {
         task: RuntimeTask,
         seccomp_mode: RuntimeSeccompMode,
     ) -> super::RuntimeExecutionOutcome {
+        let nsjail = detect_nsjail_binary()
+            .unwrap_or_else(|| panic!("skipping nsjail-backed test: missing nsjail binary"));
         let worker = RuntimeWorker::new(
             crate::build_default_runtime_catalog(),
             unique_test_workdir("runtime-safety"),
-            "/usr/bin/nsjail",
+            nsjail,
             seccomp_mode,
             RuntimeSyscallFlavor::Generic,
-            RuntimeSyscallArch::X86_64,
+            current_test_arch(),
         );
         let artifacts = worker.prepare(task).expect("artifacts should prepare");
         let outcome = worker
@@ -4429,6 +4435,33 @@ fn main() {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    fn command_path(command: &str) -> Option<String> {
+        StdCommand::new("/bin/sh")
+            .args(["-lc", &format!("command -v {command}")])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|output| output.trim().to_owned())
+            .filter(|output| !output.is_empty())
+    }
+
+    fn detect_nsjail_binary() -> Option<String> {
+        ["/usr/bin/nsjail", "/bin/nsjail"]
+            .into_iter()
+            .find(|candidate| Path::new(candidate).exists())
+            .map(str::to_owned)
+            .or_else(|| command_path("nsjail"))
+    }
+
+    fn current_test_arch() -> RuntimeSyscallArch {
+        match std::env::consts::ARCH {
+            "x86_64" => RuntimeSyscallArch::X86_64,
+            "aarch64" => RuntimeSyscallArch::Aarch64,
+            _ => RuntimeSyscallArch::Other,
+        }
     }
 
     fn rust_target_installed(target: &str) -> bool {
