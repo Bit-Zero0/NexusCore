@@ -1,0 +1,15 @@
+[cpp]
+raw:       brk close execve exit_group faccessat futex getrandom ioctl lseek mmap mprotect munmap newfstatat openat prlimit64 read rseq set_robust_list set_tid_address write
+steady:    brk close exit_group faccessat futex getrandom ioctl lseek mmap mprotect munmap newfstatat openat prlimit64 read rseq set_robust_list set_tid_address write
+normalized:brk close execve exit_group faccessat file_stat futex getrandom ioctl lseek mmap mprotect munmap openat prlimit64 read rseq set_robust_list set_tid_address write
+
+[rust]
+raw:       brk close execve exit_group faccessat getrandom gettid mmap mprotect munmap newfstatat openat ppoll prlimit64 read rseq rt_sigaction sched_getaffinity set_robust_list set_tid_address sigaltstack write
+steady:    brk close exit_group faccessat getrandom gettid mmap mprotect munmap newfstatat openat ppoll prlimit64 read rseq rt_sigaction sched_getaffinity set_robust_list set_tid_address sigaltstack write
+normalized:brk close execve exit_group faccessat file_stat getrandom gettid mmap mprotect munmap openat ppoll prlimit64 read rseq scheduler_affinity set_robust_list set_tid_address signal_runtime write
+
+[wasmtime]
+raw:       brk clock_nanosleep clone close epoll_create1 epoll_ctl epoll_pwait eventfd2 execve exit exit_group faccessat fcntl futex getpriority getrandom gettid ioctl lseek madvise membarrier memfd_create mkdirat mmap mprotect mremap munmap newfstatat openat ppoll prctl prlimit64 read readlinkat renameat rseq rt_sigaction rt_sigprocmask sched_getaffinity set_robust_list set_tid_address setpriority sigaltstack socketpair statx write
+steady:    brk clock_nanosleep clone close epoll_create1 epoll_ctl epoll_pwait eventfd2 exit exit_group faccessat fcntl futex getpriority getrandom gettid ioctl lseek madvise membarrier memfd_create mkdirat mmap mprotect mremap munmap newfstatat openat ppoll prctl prlimit64 read readlinkat renameat rseq rt_sigaction rt_sigprocmask sched_getaffinity set_robust_list set_tid_address setpriority sigaltstack socketpair statx write
+normalized:brk clock_nanosleep close epoll_create1 epoll_ctl epoll_pwait eventfd2 execve exit exit_group faccessat fcntl file_stat futex getpriority getrandom gettid ioctl lseek madvise membarrier memfd_create mkdirat mmap mprotect mremap munmap openat ppoll prctl prlimit64 process_clone read readlinkat renameat rseq scheduler_affinity set_robust_list set_tid_address setpriority signal_runtime socketpair write
+

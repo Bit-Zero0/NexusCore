@@ -1,0 +1,84 @@
+===== flavor: generic =====
+# flavor: generic
+
+[cpp -> cpp_native_default]
+steady_missing: 
+steady_extra:   access arch_prctl clock_gettime newfstat open pread64 readlink readlinkat readv rt_sigaction rt_sigprocmask sigaltstack unlink wait4 writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime open pread64 readlink readlinkat readv signal_runtime unlink wait4 writev
+
+[rust -> rust_native_default]
+steady_missing: 
+steady_extra:   access arch_prctl clock_gettime futex lseek newfstat open poll pread64 readlink readlinkat readv rt_sigprocmask unlink wait4 writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime futex lseek open poll pread64 readlink readlinkat readv unlink wait4 writev
+
+[wasmtime -> wasm_default]
+steady_missing: statx
+steady_extra:   access arch_prctl clock_gettime clone3 dup dup2 epoll_wait getdents64 getpid mkdir newfstat open pipe2 poll pread64 readlink readv rename sched_yield sysinfo unlink wait4 writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime dup dup2 epoll_wait getdents64 getpid mkdir open pipe2 poll pread64 readlink readv rename sysinfo unlink wait4 writev
+
+===== flavor: debian_ubuntu =====
+# flavor: debian_ubuntu
+
+[cpp -> cpp_native_default]
+steady_missing: 
+steady_extra:   access arch_prctl clock_gettime fstat newfstat open pread64 readlink readlinkat readv rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack statx unlink wait4 waitid writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime open pread64 readlink readlinkat readv signal_runtime unlink wait4 waitid writev
+
+[rust -> rust_native_default]
+steady_missing: 
+steady_extra:   access arch_prctl clock_gettime fstat futex lseek newfstat open poll pread64 readlink readlinkat readv rt_sigprocmask rt_sigreturn statx unlink wait4 waitid writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime futex lseek open poll pread64 readlink readlinkat readv unlink wait4 waitid writev
+
+[wasmtime -> wasm_default]
+steady_missing: 
+steady_extra:   access arch_prctl clock_gettime clone3 dup dup2 epoll_wait fstat getdents64 getpid mkdir newfstat open pipe2 poll pread64 readlink readv rename rt_sigreturn sched_yield sysinfo unlink wait4 waitid writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime dup dup2 epoll_wait getdents64 getpid mkdir open pipe2 poll pread64 readlink readv rename sysinfo unlink wait4 waitid writev
+
+===== flavor: arch =====
+# flavor: arch
+
+[cpp -> cpp_native_default]
+steady_missing: 
+steady_extra:   access arch_prctl clock_gettime fstat open pread64 readlink readlinkat readv rt_sigaction rt_sigprocmask sigaltstack statx unlink wait4 writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime open pread64 readlink readlinkat readv signal_runtime unlink wait4 writev
+
+[rust -> rust_native_default]
+steady_missing: 
+steady_extra:   access arch_prctl clock_gettime fstat futex lseek open poll pread64 readlink readlinkat readv rt_sigprocmask statx unlink wait4 writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime futex lseek open poll pread64 readlink readlinkat readv unlink wait4 writev
+
+[wasmtime -> wasm_default]
+steady_missing: 
+steady_extra:   access arch_prctl clock_gettime clone3 dup dup2 epoll_wait fstat getdents64 getpid mkdir open pipe2 poll pread64 readlink readv rename sched_yield sysinfo unlink wait4 writev
+norm_missing:   execve
+norm_extra:     access arch_prctl clock_gettime dup dup2 epoll_wait getdents64 getpid mkdir open pipe2 poll pread64 readlink readv rename sysinfo unlink wait4 writev
+
+===== flavor: rhel_like =====
+# flavor: rhel_like
+
+[cpp -> cpp_native_default]
+steady_missing: ioctl
+steady_extra:   access arch_prctl clock_gettime newfstat pread64 readlink readlinkat rt_sigaction rt_sigprocmask statx unlink wait4 waitid
+norm_missing:   execve ioctl
+norm_extra:     access arch_prctl clock_gettime pread64 readlink readlinkat signal_runtime unlink wait4 waitid
+
+[rust -> rust_native_default]
+steady_missing: sched_getaffinity sigaltstack
+steady_extra:   access arch_prctl clock_gettime futex lseek newfstat poll pread64 readlink readlinkat rt_sigprocmask statx unlink wait4 waitid
+norm_missing:   execve scheduler_affinity
+norm_extra:     access arch_prctl clock_gettime futex lseek poll pread64 readlink readlinkat unlink wait4 waitid
+
+[wasmtime -> wasm_default]
+steady_missing: clone memfd_create sigaltstack
+steady_extra:   access arch_prctl clock_gettime clone3 dup dup2 epoll_wait getdents64 getpid mkdir newfstat pipe2 poll pread64 readlink rename sysinfo unlink wait4 waitid
+norm_missing:   execve memfd_create
+norm_extra:     access arch_prctl clock_gettime dup dup2 epoll_wait getdents64 getpid mkdir pipe2 poll pread64 readlink rename sysinfo unlink wait4 waitid
+

@@ -2341,7 +2341,7 @@ fn syscall_group_expansion(
 ) -> Vec<&'static str> {
     let flavor = syscall_profile.flavor;
     let arch = syscall_profile.arch;
-    match group {
+    let mut allowed = match group {
         SyscallGroup::RuntimeCore => match flavor {
             RuntimeSyscallFlavor::DebianUbuntu => vec![
                 "access",
@@ -2707,7 +2707,28 @@ fn syscall_group_expansion(
                 "ioctl", "pipe2", "sysinfo",
             ],
         },
+    };
+
+    if arch == RuntimeSyscallArch::Aarch64 {
+        allowed.retain(|&s| {
+            !matches!(
+                s,
+                "access"
+                    | "arch_prctl"
+                    | "dup2"
+                    | "epoll_wait"
+                    | "fstat"
+                    | "mkdir"
+                    | "open"
+                    | "poll"
+                    | "readlink"
+                    | "rename"
+                    | "unlink"
+            )
+        });
     }
+
+    allowed
 }
 
 fn normalize_syscall_name(syscall: &'static str) -> &'static str {

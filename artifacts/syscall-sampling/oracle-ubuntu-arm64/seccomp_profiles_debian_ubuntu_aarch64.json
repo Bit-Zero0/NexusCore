@@ -1,0 +1,35 @@
+[compiler]
+flavor:    debian_ubuntu
+arch:      aarch64
+groups:    compiler_exec compiler_extras file_open_compat file_stat_compat process_lifecycle_compat runtime_core signal_compat thread_compat
+syscalls:  access arch_prctl brk clock_gettime clone clone3 close dup dup2 execve execveat exit_group faccessat fstat futex getcwd getegid geteuid getgid getrandom gettid getuid ioctl lseek mmap mprotect munmap newfstat newfstatat open openat pipe2 pread64 prlimit64 read readlink readlinkat readv rseq rt_sigaction rt_sigprocmask rt_sigreturn set_robust_list set_tid_address sigaltstack statx sysinfo unlink wait4 waitid write writev
+normalized:access arch_prctl brk clock_gettime close dup dup2 execve execveat exit_group faccessat file_stat futex getcwd getegid geteuid getgid getrandom gettid getuid ioctl lseek mmap mprotect munmap open openat pipe2 pread64 prlimit64 process_clone read readlink readlinkat readv rseq set_robust_list set_tid_address signal_runtime sysinfo unlink wait4 waitid write writev
+
+[cpp_native_default]
+flavor:    debian_ubuntu
+arch:      aarch64
+groups:    cpp_runtime_extras file_open_compat file_stat_compat process_lifecycle_compat runtime_core signal_compat
+syscalls:  access arch_prctl brk clock_gettime close exit_group faccessat fstat futex getrandom ioctl lseek mmap mprotect munmap newfstat newfstatat open openat pread64 prlimit64 read readlink readlinkat readv rseq rt_sigaction rt_sigprocmask rt_sigreturn set_robust_list set_tid_address sigaltstack statx unlink wait4 waitid write writev
+normalized:access arch_prctl brk clock_gettime close exit_group faccessat file_stat futex getrandom ioctl lseek mmap mprotect munmap open openat pread64 prlimit64 read readlink readlinkat readv rseq set_robust_list set_tid_address signal_runtime unlink wait4 waitid write writev
+
+[python_default]
+flavor:    debian_ubuntu
+arch:      aarch64
+groups:    file_open_compat file_stat_compat process_lifecycle_compat python_runtime_extras runtime_core signal_compat thread_compat
+syscalls:  access arch_prctl brk clock_gettime clone clone3 close dup dup2 exit_group faccessat fstat futex getcwd getdents64 getegid geteuid getgid getrandom gettid getuid lseek mmap mprotect munmap newfstat newfstatat open openat pipe2 pread64 prlimit64 read readlink readlinkat readv rseq rt_sigaction rt_sigprocmask rt_sigreturn set_robust_list set_tid_address sigaltstack statx sysinfo unlink wait4 waitid write writev
+normalized:access arch_prctl brk clock_gettime close dup dup2 exit_group faccessat file_stat futex getcwd getdents64 getegid geteuid getgid getrandom gettid getuid lseek mmap mprotect munmap open openat pipe2 pread64 prlimit64 process_clone read readlink readlinkat readv rseq set_robust_list set_tid_address signal_runtime sysinfo unlink wait4 waitid write writev
+
+[rust_native_default]
+flavor:    debian_ubuntu
+arch:      aarch64
+groups:    file_open_compat file_stat_compat process_lifecycle_compat runtime_core rust_runtime_extras signal_compat
+syscalls:  access arch_prctl brk clock_gettime close exit_group faccessat fstat futex getrandom gettid lseek mmap mprotect munmap newfstat newfstatat open openat poll ppoll pread64 prlimit64 read readlink readlinkat readv rseq rt_sigaction rt_sigprocmask rt_sigreturn sched_getaffinity set_robust_list set_tid_address sigaltstack statx unlink wait4 waitid write writev
+normalized:access arch_prctl brk clock_gettime close exit_group faccessat file_stat futex getrandom gettid lseek mmap mprotect munmap open openat poll ppoll pread64 prlimit64 read readlink readlinkat readv rseq scheduler_affinity set_robust_list set_tid_address signal_runtime unlink wait4 waitid write writev
+
+[wasm_default]
+flavor:    debian_ubuntu
+arch:      aarch64
+groups:    file_open_compat file_stat_compat process_lifecycle_compat runtime_core rust_runtime_extras signal_compat thread_compat wasmtime_runtime_extras
+syscalls:  access arch_prctl brk clock_gettime clock_nanosleep clone clone3 close dup dup2 epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit exit_group faccessat fcntl fstat futex getdents64 getpid getpriority getrandom gettid ioctl lseek madvise membarrier memfd_create mkdir mkdirat mmap mprotect mremap munmap newfstat newfstatat open openat pipe2 poll ppoll prctl pread64 prlimit64 read readlink readlinkat readv rename renameat rseq rt_sigaction rt_sigprocmask rt_sigreturn sched_getaffinity sched_yield set_robust_list set_tid_address setpriority sigaltstack socketpair statx sysinfo unlink wait4 waitid write writev
+normalized:access arch_prctl brk clock_gettime clock_nanosleep close dup dup2 epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit exit_group faccessat fcntl file_stat futex getdents64 getpid getpriority getrandom gettid ioctl lseek madvise membarrier memfd_create mkdir mkdirat mmap mprotect mremap munmap open openat pipe2 poll ppoll prctl pread64 prlimit64 process_clone read readlink readlinkat readv rename renameat rseq scheduler_affinity set_robust_list set_tid_address setpriority signal_runtime socketpair sysinfo unlink wait4 waitid write writev
+
