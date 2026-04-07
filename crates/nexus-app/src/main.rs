@@ -1,6 +1,6 @@
 mod telemetry;
 
-use axum::{routing::get, Json, Router};
+use axum::{http::header, routing::get, Json, Router};
 use nexus_config::{AppConfig, AppProcessRole};
 use nexus_gateway::{
     build_gateway_services, build_router, build_router_with_services, map_runtime_worker_groups,
@@ -11,7 +11,7 @@ use redis::Client as RedisClient;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::{info, warn};
 
 #[tokio::main]
@@ -29,6 +29,7 @@ async fn main() -> AppResult<()> {
     info!(
         env = %config.app_env,
         process_role = ?config.process_role,
+        broker_backend = ?config.runtime.broker_backend,
         bind_addr = %config.server.bind_addr,
         "starting nexus-app"
     );
@@ -38,14 +39,18 @@ async fn main() -> AppResult<()> {
             let listener = tokio::net::TcpListener::bind(config.server.bind_addr)
                 .await
                 .map_err(|_| nexus_shared::AppError::Internal)?;
-            let (oj_service, runtime_service) = build_gateway_services(&config).await?;
-            runtime_service.register_node(config.runtime.node_id.clone());
-            runtime_service
+            let services =
+                build_gateway_services(&config, RedisClient::open(config.redis.url.as_str()).ok())
+                    .await?;
+            services
+                .runtime_service
+                .register_node(config.runtime.node_id.clone());
+            services
+                .runtime_service
                 .start_background_workers(map_runtime_worker_groups(&config.runtime.worker_groups));
-            spawn_runtime_node_heartbeat(&config, runtime_service.clone());
+            spawn_runtime_node_heartbeat(&config, services.runtime_service.clone());
             let router = build_router_with_services(
-                oj_service,
-                runtime_service,
+                services,
                 RedisClient::open(config.redis.url.as_str()).ok(),
                 true,
                 &config.server.cors_allowed_origins,
@@ -69,16 +74,31 @@ async fn main() -> AppResult<()> {
             let listener = tokio::net::TcpListener::bind(config.server.bind_addr)
                 .await
                 .map_err(|_| nexus_shared::AppError::Internal)?;
-            let (.., runtime_service) = build_gateway_services(&config).await?;
-            runtime_service.register_node(config.runtime.node_id.clone());
-            runtime_service
+            let services =
+                build_gateway_services(&config, RedisClient::open(config.redis.url.as_str()).ok())
+                    .await?;
+            services
+                .runtime_service
+                .register_node(config.runtime.node_id.clone());
+            services
+                .runtime_service
                 .start_background_workers(map_runtime_worker_groups(&config.runtime.worker_groups));
-            spawn_runtime_node_heartbeat(&config, runtime_service.clone());
+            spawn_runtime_node_heartbeat(&config, services.runtime_service.clone());
             let router = Router::new()
                 .route("/healthz", get(runtime_worker_healthz))
                 .route("/api/v1/system/health", get(runtime_worker_healthz))
-                .merge(nexus_runtime::build_router(runtime_service))
-                .layer(TraceLayer::new_for_http());
+                .route(
+                    "/metrics",
+                    get({
+                        let runtime_service = services.runtime_service.clone();
+                        move || runtime_metrics(runtime_service.clone())
+                    }),
+                )
+                .merge(nexus_runtime::build_router(services.runtime_service))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(DefaultMakeSpan::new().include_headers(false)),
+                );
             axum::serve(listener, router)
                 .with_graceful_shutdown(shutdown_signal())
                 .await
@@ -94,6 +114,13 @@ async fn runtime_worker_healthz() -> Json<HealthStatus> {
         "nexus-runtime-worker",
         env!("CARGO_PKG_VERSION"),
     ))
+}
+
+async fn runtime_metrics(
+    runtime_service: Arc<nexus_runtime::RuntimeTaskService>,
+) -> AppResult<([(header::HeaderName, &'static str); 1], String)> {
+    let body = nexus_runtime::render_prometheus_metrics(runtime_service.as_ref()).await?;
+    Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body))
 }
 
 fn spawn_runtime_node_heartbeat(

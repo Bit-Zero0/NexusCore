@@ -541,3 +541,59 @@ runtime_node_heartbeats
 - 鉴权与 RBAC
 
 这些能力后续若补充，建议以“平台运维控制 API”单独成文，不直接混入当前只读/诊断型契约。
+### 5.4 获取 broker 管理视图
+
+```http
+GET /api/v1/runtime/management/broker
+```
+
+可选查询参数：
+- `queue`
+- `lane`
+- `group`
+- `task_id`
+- `delivery_id`
+- `limit`
+- `offset`
+
+用途：
+- 给控制面/UI 提供单个稳定的 broker 管理视图
+- 汇总 broker 能力、worker groups、queue stats、dead letters、replay history
+
+返回要点：
+- `summary.dead_letter_records_total` 表示过滤后的 dead-letter 总数，不受当前分页窗口影响
+- `summary.replay_history_total` 表示过滤后的 replay history 总数，不受当前分页窗口影响
+- `health.status` 统一表达 broker 当前是否处于 `healthy` / `degraded`
+- `health.degradation_reasons` 给出结构化降级原因，控制面不需要自己根据布尔值二次推断
+- `health.alerts` 给出可直接渲染的告警摘要，包含 `code / severity / reason / message / recommended_action`
+- `health.alerts[].recommended_action` 采用结构化字段，当前包含 `label / action_kind / runbook_ref`
+- `health.alerts[].recommended_action.runbook` 给出可直接跳转的 runbook 元信息，包含 `runbook_ref / title / doc_path / section_ref`
+- `health.recovery_window_active` 表示 broker 最近是否仍处于恢复窗口
+- `health.persistent_failures_detected` 表示最近失败计数是否达到持续失败阈值
+- `health.last_failure_at_ms` 和 `health.recent_failure_count` 用于控制面做恢复态展示和排障跳转
+
+### 5.5 获取 broker runbook catalog
+
+```http
+GET /api/v1/runtime/management/runbooks
+```
+
+用途：
+- 给控制面提供稳定的 runbook 引用目录
+- 让 `runbook_ref` 可以解析成 `title / doc_path / section_ref`
+
+### 5.6 获取 dead-letter replay 历史
+
+```http
+GET /api/v1/runtime/queues/replays
+```
+
+可选查询参数：
+- `queue`
+- `lane`
+- `task_id`
+- `delivery_id`
+- `limit`
+- `offset`
+
+返回结果按 `replayed_at_ms` 倒序排列，默认 `limit=50`。

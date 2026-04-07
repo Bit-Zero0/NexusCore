@@ -1,176 +1,136 @@
+#[path = "support/broker_contract.rs"]
+mod broker_contract;
+
 use std::sync::Arc;
 
-use nexus_runtime::{
-    build_rabbitmq_runtime_queue, OjJudgeTask, RabbitMqQueueConfig, RuntimeJudgeMode,
-    RuntimeLimits, RuntimeRetryPolicy, RuntimeRouteBinding, RuntimeSandboxKind, RuntimeTask,
-    RuntimeTaskPayload, RuntimeTaskQueue, RuntimeTaskType, RuntimeTestcase,
+use broker_contract::{
+    assert_dead_letter_persists_across_reconnect, assert_dead_letter_replay_is_consistent,
+    assert_duplicate_delivery_is_eventually_singular, assert_publish_reserve_ack_roundtrip,
+    assert_reclaims_unacked_delivery_after_reconnect, assert_reject_moves_to_dead_letter,
+    assert_retry_dead_letter_and_replay_roundtrip, assert_retry_delay_boundary,
+    assert_round_robin_across_routes, assert_route_fairness_jitter_stays_bounded,
+    assert_stats_reflect_queue_states, BrokerContractHarness,
 };
-use nexus_shared::{ProblemId, SubmissionId, UserId};
-use tokio::time::{sleep, Duration, Instant};
+use nexus_runtime::{
+    build_rabbitmq_runtime_queue, RabbitMqQueueConfig, RuntimeRouteBinding,
+    RABBITMQ_BROKER_CAPABILITIES,
+};
 use ulid::Ulid;
 
 #[tokio::test]
 async fn rabbitmq_publish_reserve_ack_roundtrip() {
-    let Some((queue, binding)) = test_queue().await else {
+    let Some(harness) = test_harness() else {
         return;
     };
-    let task = runtime_task(&binding.queue, &binding.lane, 3);
-
-    queue
-        .enqueue(task.clone())
-        .await
-        .expect("enqueue should succeed");
-    let delivery = reserve_until(
-        &queue,
-        std::slice::from_ref(&binding),
-        Duration::from_secs(3),
-    )
-    .await
-    .expect("delivery should exist");
-
-    assert_eq!(delivery.task.task_id, task.task_id);
-    assert_eq!(delivery.attempt, 1);
-    queue
-        .ack(&delivery.delivery_id)
-        .await
-        .expect("ack should succeed");
+    assert_publish_reserve_ack_roundtrip(harness).await;
 }
 
 #[tokio::test]
 async fn rabbitmq_retry_dead_letter_and_replay_roundtrip() {
-    let Some((queue, binding)) = test_queue().await else {
+    let Some(harness) = test_harness() else {
         return;
     };
-    let mut task = runtime_task(&binding.queue, &binding.lane, 2);
-    task.retry_policy.retry_delay_ms = 50;
-
-    queue
-        .enqueue(task.clone())
-        .await
-        .expect("enqueue should succeed");
-
-    let first = reserve_until(
-        &queue,
-        std::slice::from_ref(&binding),
-        Duration::from_secs(3),
-    )
-    .await
-    .expect("first delivery should exist");
-    let disposition = queue
-        .retry(&first.delivery_id, "transient failure", 50)
-        .await
-        .expect("retry should succeed");
-    assert_eq!(format!("{disposition:?}"), "Requeued");
-
-    let second = reserve_until(
-        &queue,
-        std::slice::from_ref(&binding),
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("second delivery should exist");
-    assert_eq!(second.attempt, 2);
-    assert_eq!(second.last_error.as_deref(), Some("transient failure"));
-
-    let disposition = queue
-        .retry(&second.delivery_id, "persistent failure", 50)
-        .await
-        .expect("retry should move to dead letter");
-    assert_eq!(format!("{disposition:?}"), "DeadLettered");
-
-    let dead_letters = queue
-        .dead_letters()
-        .await
-        .expect("dead letters should be readable");
-    assert_eq!(dead_letters.len(), 1);
-    assert_eq!(dead_letters[0].task_id, task.task_id);
-
-    queue
-        .replay_dead_letter(&dead_letters[0].delivery_id)
-        .await
-        .expect("replay should succeed");
-
-    let replayed = reserve_until(
-        &queue,
-        std::slice::from_ref(&binding),
-        Duration::from_secs(3),
-    )
-    .await
-    .expect("replayed delivery should exist");
-    assert_eq!(replayed.attempt, 1);
-    assert!(replayed
-        .last_error
-        .as_deref()
-        .is_some_and(|value| value.contains("replayed from dead letter")));
+    assert_retry_dead_letter_and_replay_roundtrip(harness).await;
 }
 
-async fn test_queue() -> Option<(Arc<dyn RuntimeTaskQueue>, RuntimeRouteBinding)> {
+#[tokio::test]
+async fn rabbitmq_dead_letter_persists_across_reconnect() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_dead_letter_persists_across_reconnect(harness).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_reject_moves_to_dead_letter() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_reject_moves_to_dead_letter(harness).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_stats_reflect_queue_states() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_stats_reflect_queue_states(harness).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_round_robin_across_routes() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_round_robin_across_routes(harness).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_reclaims_unacked_delivery_after_reconnect() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_reclaims_unacked_delivery_after_reconnect(harness).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_retry_delay_boundary() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_retry_delay_boundary(harness).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_route_fairness_jitter_stays_bounded() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_route_fairness_jitter_stays_bounded(harness).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_dead_letter_replay_is_consistent() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_dead_letter_replay_is_consistent(harness).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_duplicate_delivery_is_eventually_singular() {
+    let Some(harness) = test_harness() else {
+        return;
+    };
+    assert_duplicate_delivery_is_eventually_singular(harness).await;
+}
+
+fn test_harness() -> Option<BrokerContractHarness<RabbitMqQueueConfig>> {
     let url = std::env::var("NEXUS_RABBITMQ_TEST_URL").ok()?;
     let suffix = Ulid::new().to_string().to_lowercase();
     let binding = RuntimeRouteBinding {
         queue: format!("it_queue_{suffix}"),
         lane: "fast".to_owned(),
     };
-    let queue = build_rabbitmq_runtime_queue(RabbitMqQueueConfig {
+    let secondary_binding = RuntimeRouteBinding {
+        queue: format!("it_queue_alt_{suffix}"),
+        lane: "normal".to_owned(),
+    };
+    let config = RabbitMqQueueConfig {
         url,
         exchange: format!("nexus.runtime.it.{suffix}"),
         queue_prefix: format!("nexus.runtime.it.{suffix}"),
-    })
-    .await
-    .ok()?;
+    };
 
-    Some((queue, binding))
-}
-
-async fn reserve_until(
-    queue: &Arc<dyn RuntimeTaskQueue>,
-    bindings: &[RuntimeRouteBinding],
-    timeout: Duration,
-) -> Option<nexus_runtime::RuntimeTaskDelivery> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(delivery) = queue.reserve(bindings).await {
-            return Some(delivery);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn runtime_task(queue: &str, lane: &str, max_attempts: u32) -> RuntimeTask {
-    let task_id = format!("task-{}", Ulid::new());
-    RuntimeTask {
-        task_id: task_id.clone(),
-        task_type: RuntimeTaskType::OjJudge,
-        source_domain: "oj".to_owned(),
-        source_entity_id: format!("sub-{task_id}"),
-        queue: queue.to_owned(),
-        lane: lane.to_owned(),
-        retry_policy: RuntimeRetryPolicy {
-            max_attempts,
-            retry_delay_ms: 50,
-        },
-        payload: RuntimeTaskPayload::OjJudge(OjJudgeTask {
-            submission_id: SubmissionId::from(format!("sub-{task_id}")),
-            problem_id: ProblemId::from("p-it"),
-            user_id: UserId::from("u-it"),
-            language: "cpp".to_owned(),
-            judge_mode: RuntimeJudgeMode::Acm,
-            sandbox_kind: RuntimeSandboxKind::Nsjail,
-            source_code: "int main() { return 0; }".to_owned(),
-            limits: RuntimeLimits {
-                time_limit_ms: 1000,
-                memory_limit_kb: 262144,
-            },
-            testcases: vec![RuntimeTestcase {
-                case_no: 1,
-                input: "1\n".to_owned(),
-                expected_output: "1\n".to_owned(),
-                score: 100,
-            }],
-            judge_config: None,
+    Some(BrokerContractHarness {
+        config,
+        binding,
+        secondary_binding,
+        retry_delay_ms: 50,
+        capabilities: RABBITMQ_BROKER_CAPABILITIES,
+        reclaim_wait_ms: 150,
+        build_queue: Arc::new(|config| {
+            Box::pin(async move { build_rabbitmq_runtime_queue(config).await.ok() })
         }),
-    }
+    })
 }

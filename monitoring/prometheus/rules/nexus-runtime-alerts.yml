@@ -1,0 +1,47 @@
+groups:
+  - name: nexus-runtime-broker-alerts
+    interval: 30s
+    rules:
+      - alert: NexusBrokerOperationFailuresHigh
+        expr: sum by (broker, operation) (rate(nexus_runtime_broker_operation_failure_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          service: nexus-runtime
+          category: broker
+        annotations:
+          summary: "Nexus broker operation failures are persisting"
+          description: "Broker {{ $labels.broker }} has sustained {{ $labels.operation }} failures for at least 10 minutes."
+
+      - alert: NexusBrokerDeadLettersDetected
+        expr: sum by (broker, queue, lane, reason) (increase(nexus_runtime_broker_dead_letter_total[15m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: nexus-runtime
+          category: dead-letter
+        annotations:
+          summary: "Nexus broker dead letters detected"
+          description: "Broker {{ $labels.broker }} produced dead letters on {{ $labels.queue }}/{{ $labels.lane }} because of {{ $labels.reason }} in the last 15 minutes."
+
+      - alert: NexusBrokerReclaimSpike
+        expr: ((sum by (broker, queue, lane) (increase(nexus_runtime_broker_reclaim_total[15m])) or vector(0)) + (sum by (broker, queue, lane) (increase(nexus_runtime_broker_reclaim_orphan_cleanup_total[15m])) or vector(0))) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: nexus-runtime
+          category: reclaim
+        annotations:
+          summary: "Nexus broker reclaim activity is elevated"
+          description: "Broker {{ $labels.broker }} is reclaiming many deliveries on {{ $labels.queue }}/{{ $labels.lane }}. Check worker liveness and lease settings."
+
+      - alert: NexusBrokerQueueBacklogHigh
+        expr: sum by (broker, queue, lane) (nexus_runtime_queue_depth{state=~"queued|delayed"}) > 50
+        for: 10m
+        labels:
+          severity: warning
+          service: nexus-runtime
+          category: backlog
+        annotations:
+          summary: "Nexus broker queue backlog is growing"
+          description: "Broker {{ $labels.broker }} has more than 50 queued or delayed tasks on {{ $labels.queue }}/{{ $labels.lane }} for at least 10 minutes."

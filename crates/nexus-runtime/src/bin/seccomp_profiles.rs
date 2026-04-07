@@ -40,9 +40,7 @@ fn main() {
     let requested = args
         .iter()
         .filter(|arg| {
-            arg.as_str() != "--json"
-                && !arg.starts_with("--flavor=")
-                && !arg.starts_with("--arch=")
+            arg.as_str() != "--json" && !arg.starts_with("--flavor=") && !arg.starts_with("--arch=")
         })
         .map(|arg| arg.as_str())
         .collect::<Vec<_>>();

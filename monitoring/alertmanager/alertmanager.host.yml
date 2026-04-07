@@ -1,0 +1,32 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: generic-all
+  group_by: ["alertname", "severity", "broker", "queue", "lane"]
+  group_wait: 5s
+  group_interval: 30s
+  repeat_interval: 1h
+  routes:
+    - receiver: critical-wecom
+      matchers:
+        - severity = "critical"
+    - receiver: warning-feishu
+      matchers:
+        - severity = "warning"
+
+receivers:
+  - name: generic-all
+    webhook_configs:
+      - url: http://host.docker.internal:18081/dry-run
+      - url: http://host.docker.internal:18081/generic
+  - name: critical-wecom
+    webhook_configs:
+      - url: http://host.docker.internal:18081/dry-run
+      - url: http://host.docker.internal:18081/generic
+      - url: http://host.docker.internal:18081/wecom
+  - name: warning-feishu
+    webhook_configs:
+      - url: http://host.docker.internal:18081/dry-run
+      - url: http://host.docker.internal:18081/generic
+      - url: http://host.docker.internal:18081/feishu

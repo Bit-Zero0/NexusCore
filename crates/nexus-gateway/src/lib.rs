@@ -1,23 +1,37 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::{extract::Query, http::Method, routing::get, Json, Router};
+use axum::{
+    extract::Query,
+    http::{header, Method},
+    routing::get,
+    Json, Router,
+};
 use nexus_auth::build_dev_auth_service;
 use nexus_config::{
-    AppConfig, OjRepositoryMode, RuntimeQueueBackend as ConfigRuntimeQueueBackend,
+    AppConfig, OjRepositoryMode, RuntimeBrokerBackend as ConfigRuntimeBrokerBackend,
     RuntimeSeccompMode as ConfigRuntimeSeccompMode, RuntimeSyscallArch as ConfigRuntimeSyscallArch,
     RuntimeSyscallFlavor as ConfigRuntimeSyscallFlavor, RuntimeWorkerGroupConfig,
+};
+use nexus_jobs::{
+    build_router as build_jobs_router, oj_judge_job_handler, DefaultJobQueryService,
+    DefaultJobSubmissionValidator, InMemoryJobDefinitionStore, InMemoryJobEventStore,
+    InMemoryJobHandlerRegistry, JobHandlerRegistry, JobPlatformService, JobQueryService,
+    JobRuntimeEventObserver, RuntimeBackedJobSubmitter,
 };
 use nexus_oj::{
     build_default_catalog, build_router as build_oj_router, InMemoryProblemRepository,
     InMemorySubmissionRepository, OjService, PgProblemRepository, PgSubmissionRepository,
 };
 use nexus_runtime::{
-    build_default_runtime_catalog, build_rabbitmq_runtime_queue,
-    build_router as build_runtime_router, build_runtime_queue, RabbitMqQueueConfig,
-    RuntimeEventObserver, RuntimeNodeHealthStatus, RuntimeNodeStatus, RuntimeQueueBackend,
-    RuntimeRouteBinding, RuntimeSeccompMode, RuntimeSyscallArch, RuntimeSyscallFlavor,
-    RuntimeTaskEvent, RuntimeTaskService, RuntimeWorker, RuntimeWorkerGroup,
+    build_default_runtime_catalog, build_nats_runtime_queue, build_rabbitmq_runtime_queue,
+    build_redis_streams_runtime_queue, build_router as build_runtime_router, build_runtime_queue,
+    EnhancedBrokerCapabilities, NatsQueueConfig, RabbitMqQueueConfig, RedisStreamsQueueConfig,
+    RequiredBrokerCapabilities, RuntimeBrokerBackend, RuntimeBrokerObservabilityStatus,
+    RuntimeEventObserver, RuntimeNodeHealthStatus, RuntimeNodeStatus, RuntimeRouteBinding,
+    RuntimeSeccompMode, RuntimeSyscallArch, RuntimeSyscallFlavor, RuntimeTaskEvent,
+    RuntimeTaskService, RuntimeWorker, RuntimeWorkerGroup, MEMORY_BROKER_CAPABILITIES,
+    NATS_BROKER_CAPABILITIES, RABBITMQ_BROKER_CAPABILITIES, REDIS_STREAMS_BROKER_CAPABILITIES,
 };
 use nexus_shared::HealthStatus;
 use nexus_storage::PostgresPoolFactory;
@@ -25,7 +39,7 @@ use redis::Client as RedisClient;
 use serde::{Deserialize, Serialize};
 use tower_http::{
     cors::{Any, CorsLayer},
-    trace::TraceLayer,
+    trace::{DefaultMakeSpan, TraceLayer},
 };
 use tracing::{info, warn};
 
@@ -64,12 +78,19 @@ struct RuntimeGroupCoverage {
 
 const RUNTIME_NODE_STALE_AFTER_MS: u64 = 20_000;
 
+pub struct GatewayServices {
+    pub oj_service: Arc<OjService>,
+    pub runtime_service: Arc<RuntimeTaskService>,
+    pub job_platform_service: Arc<JobPlatformService>,
+    pub job_query_service: Arc<dyn JobQueryService>,
+    pub job_handler_registry: Arc<InMemoryJobHandlerRegistry>,
+}
+
 pub async fn build_router(config: &AppConfig) -> nexus_shared::AppResult<Router> {
     let redis_client = RedisClient::open(config.redis.url.as_str()).ok();
-    let (oj_service, runtime_service) = build_gateway_services(config).await?;
+    let services = build_gateway_services(config, redis_client.clone()).await?;
     Ok(build_router_with_services(
-        oj_service,
-        runtime_service,
+        services,
         redis_client,
         false,
         &config.server.cors_allowed_origins,
@@ -77,8 +98,7 @@ pub async fn build_router(config: &AppConfig) -> nexus_shared::AppResult<Router>
 }
 
 pub fn build_router_with_services(
-    oj_service: Arc<OjService>,
-    runtime_service: Arc<RuntimeTaskService>,
+    services: GatewayServices,
     redis_client: Option<RedisClient>,
     expose_runtime_api: bool,
     cors_allowed_origins: &[String],
@@ -95,18 +115,32 @@ pub fn build_router_with_services(
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/system/health", get(healthz))
+        .route(
+            "/metrics",
+            get({
+                let runtime_service = services.runtime_service.clone();
+                move || render_metrics(runtime_service.clone())
+            }),
+        )
         .route("/api/v1/runtime/nodes", runtime_nodes_route)
         .route("/api/v1/runtime/nodes/summary", runtime_nodes_summary_route)
         .merge(nexus_auth::build_router(build_dev_auth_service()))
+        .merge(build_jobs_router(
+            services.job_query_service.clone(),
+            services.job_handler_registry.clone(),
+        ))
         .merge(build_oj_router(
             build_default_catalog(),
-            oj_service,
-            Some(runtime_service.clone()),
+            services.oj_service.clone(),
+            Some(services.job_platform_service.clone()),
         ))
-        .layer(TraceLayer::new_for_http());
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().include_headers(false)),
+        );
 
     let router = if expose_runtime_api {
-        router.merge(build_runtime_router(runtime_service))
+        router.merge(build_runtime_router(services.runtime_service))
     } else {
         router
     };
@@ -116,11 +150,16 @@ pub fn build_router_with_services(
 
 pub async fn build_gateway_services(
     config: &AppConfig,
-) -> nexus_shared::AppResult<(Arc<OjService>, Arc<RuntimeTaskService>)> {
-    let redis_client = RedisClient::open(config.redis.url.as_str()).ok();
+    redis_client: Option<RedisClient>,
+) -> nexus_shared::AppResult<GatewayServices> {
+    let job_definition_store = Arc::new(InMemoryJobDefinitionStore::default());
+    let job_event_store = Arc::new(InMemoryJobEventStore::default());
+    let job_handler_registry = Arc::new(InMemoryJobHandlerRegistry::default());
+    job_handler_registry.register_handler(oj_judge_job_handler());
     let (oj_service, runtime_observer) =
-        build_oj_service_and_observer(config, redis_client).await?;
-    let runtime_service = Arc::new(RuntimeTaskService::with_queue(
+        build_oj_service_and_observer(config, redis_client, job_event_store.clone()).await?;
+    let (runtime_queue, broker_status) = build_runtime_queue_from_config(config).await?;
+    let runtime_service = Arc::new(RuntimeTaskService::with_queue_and_broker(
         Arc::new(RuntimeWorker::new(
             build_default_runtime_catalog(),
             config.runtime.work_root.clone(),
@@ -129,11 +168,36 @@ pub async fn build_gateway_services(
             map_runtime_syscall_flavor(config.runtime.syscall_flavor),
             map_runtime_syscall_arch(config.runtime.syscall_arch),
         )),
-        build_runtime_queue_from_config(config).await?,
+        runtime_queue,
+        broker_status,
         runtime_observer,
     ));
 
-    Ok((oj_service, runtime_service))
+    let job_platform_service = Arc::new(JobPlatformService::new(
+        Arc::new(RuntimeBackedJobSubmitter::new(
+            runtime_service.clone(),
+            job_handler_registry.clone(),
+        )),
+        Arc::new(DefaultJobSubmissionValidator::new(
+            job_handler_registry.clone(),
+        )),
+        job_definition_store.clone(),
+        job_event_store.clone(),
+    ));
+    let job_query_service = Arc::new(DefaultJobQueryService::new(
+        runtime_service.clone(),
+        job_definition_store,
+        job_event_store,
+        job_handler_registry.clone(),
+    )) as Arc<dyn JobQueryService>;
+
+    Ok(GatewayServices {
+        oj_service,
+        runtime_service,
+        job_platform_service,
+        job_query_service,
+        job_handler_registry,
+    })
 }
 
 fn map_runtime_seccomp_mode(mode: ConfigRuntimeSeccompMode) -> RuntimeSeccompMode {
@@ -165,6 +229,7 @@ fn map_runtime_syscall_arch(arch: ConfigRuntimeSyscallArch) -> RuntimeSyscallArc
 async fn build_oj_service_and_observer(
     config: &AppConfig,
     redis_client: Option<RedisClient>,
+    job_event_store: Arc<InMemoryJobEventStore>,
 ) -> nexus_shared::AppResult<(Arc<OjService>, Arc<dyn RuntimeEventObserver>)> {
     Ok(match config.oj_repository {
         OjRepositoryMode::Memory => {
@@ -175,8 +240,12 @@ async fn build_oj_service_and_observer(
             ));
             (
                 oj_service.clone(),
-                Arc::new(GatewayRuntimeObserver::new(oj_service, redis_client))
-                    as Arc<dyn RuntimeEventObserver>,
+                Arc::new(CompositeRuntimeObserver::new(vec![
+                    Arc::new(GatewayRuntimeObserver::new(oj_service, redis_client))
+                        as Arc<dyn RuntimeEventObserver>,
+                    Arc::new(JobRuntimeEventObserver::new(job_event_store))
+                        as Arc<dyn RuntimeEventObserver>,
+                ])) as Arc<dyn RuntimeEventObserver>,
             )
         }
         OjRepositoryMode::Postgres => {
@@ -189,8 +258,12 @@ async fn build_oj_service_and_observer(
             ));
             (
                 oj_service.clone(),
-                Arc::new(GatewayRuntimeObserver::new(oj_service, redis_client))
-                    as Arc<dyn RuntimeEventObserver>,
+                Arc::new(CompositeRuntimeObserver::new(vec![
+                    Arc::new(GatewayRuntimeObserver::new(oj_service, redis_client))
+                        as Arc<dyn RuntimeEventObserver>,
+                    Arc::new(JobRuntimeEventObserver::new(job_event_store))
+                        as Arc<dyn RuntimeEventObserver>,
+                ])) as Arc<dyn RuntimeEventObserver>,
             )
         }
     })
@@ -215,6 +288,13 @@ pub fn map_runtime_worker_groups(groups: &[RuntimeWorkerGroupConfig]) -> Vec<Run
 
 async fn healthz() -> Json<HealthStatus> {
     Json(HealthStatus::ok("nexus-gateway", env!("CARGO_PKG_VERSION")))
+}
+
+async fn render_metrics(
+    runtime_service: Arc<RuntimeTaskService>,
+) -> nexus_shared::AppResult<([(header::HeaderName, &'static str); 1], String)> {
+    let body = nexus_runtime::render_prometheus_metrics(runtime_service.as_ref()).await?;
+    Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body))
 }
 
 async fn list_runtime_nodes(
@@ -458,34 +538,136 @@ fn build_cors_layer(allowed_origins: &[String]) -> Option<CorsLayer> {
     Some(base.allow_origin(origins))
 }
 
-fn map_runtime_queue_backend(backend: ConfigRuntimeQueueBackend) -> RuntimeQueueBackend {
+fn map_runtime_broker_backend(backend: ConfigRuntimeBrokerBackend) -> RuntimeBrokerBackend {
     match backend {
-        ConfigRuntimeQueueBackend::Memory => RuntimeQueueBackend::Memory,
-        ConfigRuntimeQueueBackend::RabbitMq => RuntimeQueueBackend::Memory,
+        ConfigRuntimeBrokerBackend::Memory => RuntimeBrokerBackend::Memory,
+        ConfigRuntimeBrokerBackend::RabbitMq => RuntimeBrokerBackend::Memory,
+        ConfigRuntimeBrokerBackend::Nats => RuntimeBrokerBackend::Memory,
+        ConfigRuntimeBrokerBackend::RedisStreams => RuntimeBrokerBackend::Memory,
     }
 }
 
 async fn build_runtime_queue_from_config(
     config: &AppConfig,
-) -> nexus_shared::AppResult<Arc<dyn nexus_runtime::RuntimeTaskQueue>> {
-    match config.runtime.queue_backend {
-        ConfigRuntimeQueueBackend::Memory => Ok(build_runtime_queue(map_runtime_queue_backend(
-            config.runtime.queue_backend,
-        ))),
-        ConfigRuntimeQueueBackend::RabbitMq => {
-            build_rabbitmq_runtime_queue(RabbitMqQueueConfig {
-                url: config.runtime.rabbitmq.url.clone(),
-                exchange: config.runtime.rabbitmq.exchange.clone(),
-                queue_prefix: config.runtime.rabbitmq.queue_prefix.clone(),
-            })
-            .await
+) -> nexus_shared::AppResult<(
+    Arc<dyn nexus_runtime::RuntimeTaskQueue>,
+    RuntimeBrokerObservabilityStatus,
+)> {
+    match config.runtime.broker_backend {
+        ConfigRuntimeBrokerBackend::Memory => {
+            info!(broker = "memory", "building runtime broker");
+            Ok((
+                build_runtime_queue(map_runtime_broker_backend(config.runtime.broker_backend)),
+                runtime_broker_status(
+                    MEMORY_BROKER_CAPABILITIES.broker,
+                    MEMORY_BROKER_CAPABILITIES.required,
+                    MEMORY_BROKER_CAPABILITIES.enhanced,
+                ),
+            ))
+        }
+        ConfigRuntimeBrokerBackend::RabbitMq => {
+            info!(
+                broker = "rabbitmq",
+                exchange = %config.runtime.rabbitmq.exchange,
+                queue_prefix = %config.runtime.rabbitmq.queue_prefix,
+                "building runtime broker"
+            );
+            Ok((
+                build_rabbitmq_runtime_queue(RabbitMqQueueConfig {
+                    url: config.runtime.rabbitmq.url.clone(),
+                    exchange: config.runtime.rabbitmq.exchange.clone(),
+                    queue_prefix: config.runtime.rabbitmq.queue_prefix.clone(),
+                })
+                .await?,
+                runtime_broker_status(
+                    RABBITMQ_BROKER_CAPABILITIES.broker,
+                    RABBITMQ_BROKER_CAPABILITIES.required,
+                    RABBITMQ_BROKER_CAPABILITIES.enhanced,
+                ),
+            ))
+        }
+        ConfigRuntimeBrokerBackend::Nats => {
+            info!(
+                broker = "nats",
+                stream = %config.runtime.nats.stream_name,
+                subject_prefix = %config.runtime.nats.subject_prefix,
+                "building runtime broker"
+            );
+            Ok((
+                build_nats_runtime_queue(NatsQueueConfig {
+                    url: config.runtime.nats.url.clone(),
+                    stream_name: config.runtime.nats.stream_name.clone(),
+                    subject_prefix: config.runtime.nats.subject_prefix.clone(),
+                    consumer_prefix: config.runtime.nats.consumer_prefix.clone(),
+                    ack_wait_ms: config.runtime.nats.ack_wait_ms,
+                })
+                .await?,
+                runtime_broker_status(
+                    NATS_BROKER_CAPABILITIES.broker,
+                    NATS_BROKER_CAPABILITIES.required,
+                    NATS_BROKER_CAPABILITIES.enhanced,
+                )
+                .with_ack_wait_ms(Some(config.runtime.nats.ack_wait_ms)),
+            ))
+        }
+        ConfigRuntimeBrokerBackend::RedisStreams => {
+            info!(
+                broker = "redis_streams",
+                stream_prefix = %config.runtime.redis_streams.stream_prefix,
+                consumer_group_prefix = %config.runtime.redis_streams.consumer_group_prefix,
+                "building runtime broker"
+            );
+            Ok((
+                build_redis_streams_runtime_queue(RedisStreamsQueueConfig {
+                    url: config.runtime.redis_streams.url.clone(),
+                    stream_prefix: config.runtime.redis_streams.stream_prefix.clone(),
+                    consumer_group_prefix: config
+                        .runtime
+                        .redis_streams
+                        .consumer_group_prefix
+                        .clone(),
+                    consumer_name_prefix: config.runtime.redis_streams.consumer_name_prefix.clone(),
+                    pending_reclaim_idle_ms: config.runtime.redis_streams.pending_reclaim_idle_ms,
+                })
+                .await?,
+                runtime_broker_status(
+                    REDIS_STREAMS_BROKER_CAPABILITIES.broker,
+                    REDIS_STREAMS_BROKER_CAPABILITIES.required,
+                    REDIS_STREAMS_BROKER_CAPABILITIES.enhanced,
+                )
+                .with_pending_reclaim_idle_ms(Some(
+                    config.runtime.redis_streams.pending_reclaim_idle_ms,
+                )),
+            ))
         }
     }
+}
+
+fn runtime_broker_status(
+    broker: &str,
+    required_capabilities: RequiredBrokerCapabilities,
+    enhanced_capabilities: EnhancedBrokerCapabilities,
+) -> RuntimeBrokerObservabilityStatus {
+    RuntimeBrokerObservabilityStatus::from_capability_profile(
+        broker,
+        required_capabilities,
+        enhanced_capabilities,
+    )
 }
 
 struct GatewayRuntimeObserver {
     oj_service: Arc<OjService>,
     redis_client: Option<RedisClient>,
+}
+
+struct CompositeRuntimeObserver {
+    observers: Vec<Arc<dyn RuntimeEventObserver>>,
+}
+
+impl CompositeRuntimeObserver {
+    fn new(observers: Vec<Arc<dyn RuntimeEventObserver>>) -> Self {
+        Self { observers }
+    }
 }
 
 impl GatewayRuntimeObserver {
@@ -500,6 +682,14 @@ impl GatewayRuntimeObserver {
 #[async_trait]
 impl RuntimeEventObserver for GatewayRuntimeObserver {
     async fn on_event(&self, event: RuntimeTaskEvent) -> nexus_shared::AppResult<()> {
+        info!(
+            task_id = %event.task_id,
+            queue = %event.queue,
+            lane = %event.lane,
+            status = ?event.status,
+            submission_id = event.submission_id.as_deref().unwrap_or("-"),
+            "gateway received runtime event"
+        );
         self.oj_service.apply_runtime_event(&event).await?;
 
         if let (Some(submission_id), Some(redis_client)) =
@@ -508,6 +698,16 @@ impl RuntimeEventObserver for GatewayRuntimeObserver {
             publish_runtime_event(redis_client, submission_id, &event).await;
         }
 
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RuntimeEventObserver for CompositeRuntimeObserver {
+    async fn on_event(&self, event: RuntimeTaskEvent) -> nexus_shared::AppResult<()> {
+        for observer in &self.observers {
+            observer.on_event(event.clone()).await?;
+        }
         Ok(())
     }
 }
@@ -550,7 +750,8 @@ mod tests {
         RuntimeNodeRegistryQuery, RuntimeNodeRegistrySummary, RuntimeRouteCoverage,
     };
     use nexus_runtime::{
-        RuntimeNodeHealthStatus, RuntimeNodeStatus, RuntimeRouteBinding, RuntimeWorkerGroup,
+        RuntimeBrokerObservabilityStatus, RuntimeNodeHealthStatus, RuntimeNodeStatus,
+        RuntimeRouteBinding, RuntimeWorkerGroup,
     };
 
     fn sample_nodes() -> Vec<RuntimeNodeStatus> {
@@ -560,6 +761,7 @@ mod tests {
                 started_at_ms: 1,
                 last_heartbeat_ms: 1_000,
                 node_status: RuntimeNodeHealthStatus::Healthy,
+                broker: RuntimeBrokerObservabilityStatus::memory(),
                 worker_groups: vec![
                     RuntimeWorkerGroup {
                         name: "oj-fast".to_owned(),
@@ -582,6 +784,7 @@ mod tests {
                 started_at_ms: 2,
                 last_heartbeat_ms: 2_000,
                 node_status: RuntimeNodeHealthStatus::Healthy,
+                broker: RuntimeBrokerObservabilityStatus::memory(),
                 worker_groups: vec![RuntimeWorkerGroup {
                     name: "oj-fast".to_owned(),
                     bindings: vec![RuntimeRouteBinding {

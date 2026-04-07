@@ -5,12 +5,15 @@ use std::{
 };
 
 use async_trait::async_trait;
+use nexus_jobs::{
+    build_oj_judge_job, map_job_to_runtime_task, JobDefinition, JobRetryPolicy, JobRoute,
+    OjJudgeJobInput,
+};
 use nexus_runtime::{
-    OjJudgeTask, RuntimeCaseFinalStatus, RuntimeExecutionOutcome, RuntimeFailureKind,
-    RuntimeFunctionParameter, RuntimeFunctionSignature, RuntimeJudgeConfig, RuntimeJudgeMethod,
-    RuntimeJudgeMode, RuntimeLimits, RuntimeRetryPolicy, RuntimeSandboxKind, RuntimeSpjConfig,
-    RuntimeStageStatus, RuntimeTask, RuntimeTaskEvent, RuntimeTaskLifecycleStatus,
-    RuntimeTaskPayload, RuntimeTaskType, RuntimeTestcase, RuntimeValidatorConfig,
+    RuntimeCaseFinalStatus, RuntimeExecutionOutcome, RuntimeFailureKind, RuntimeFunctionParameter,
+    RuntimeFunctionSignature, RuntimeJudgeConfig, RuntimeJudgeMethod, RuntimeJudgeMode,
+    RuntimeLimits, RuntimeSandboxKind, RuntimeSpjConfig, RuntimeStageStatus, RuntimeTask,
+    RuntimeTaskEvent, RuntimeTaskLifecycleStatus, RuntimeTestcase, RuntimeValidatorConfig,
 };
 
 use crate::{
@@ -106,6 +109,11 @@ impl OjService {
     }
 
     pub async fn build_runtime_task(&self, submission_id: &str) -> AppResult<RuntimeTask> {
+        let job = self.build_job_definition(submission_id).await?;
+        map_job_to_runtime_task(&job)
+    }
+
+    pub async fn build_job_definition(&self, submission_id: &str) -> AppResult<JobDefinition> {
         let submission = self.get_submission_detail(submission_id).await?;
         let problem = self
             .get_problem_detail(&submission.submission.problem_id.0)
@@ -129,43 +137,43 @@ impl OjService {
                     submission.submission.language, problem.problem_id.0
                 ))
             })?;
+        let lane = derive_runtime_lane(&problem, &submission.submission.language);
+        let judge_config = problem.judge_config.clone().map(map_runtime_judge_config);
 
-        Ok(RuntimeTask {
-            task_id: format!("task-{}", submission.submission.submission_id.0),
-            task_type: RuntimeTaskType::OjJudge,
-            source_domain: "oj".to_owned(),
+        Ok(build_oj_judge_job(OjJudgeJobInput {
+            job_id: format!("task-{}", submission.submission.submission_id.0),
             source_entity_id: submission.submission.submission_id.0.clone(),
-            queue: "oj_judge".to_owned(),
-            lane: derive_runtime_lane(&problem, &submission.submission.language),
-            retry_policy: RuntimeRetryPolicy {
+            submission_id: submission.submission.submission_id,
+            problem_id: problem.problem_id,
+            user_id: submission.submission.user_id,
+            language: submission.submission.language,
+            judge_mode: map_runtime_judge_mode(&problem.judge_mode)?,
+            sandbox_kind: map_runtime_sandbox_kind(problem.sandbox_kind),
+            source_code: submission.source_code,
+            limits: RuntimeLimits {
+                time_limit_ms: limits.time_limit_ms,
+                memory_limit_kb: limits.memory_limit_kb,
+            },
+            testcases: problem
+                .testcases
+                .into_iter()
+                .map(|testcase| RuntimeTestcase {
+                    case_no: testcase.case_no,
+                    input: testcase.input,
+                    expected_output: testcase.expected_output,
+                    score: testcase.score,
+                })
+                .collect(),
+            judge_config,
+            route: JobRoute {
+                queue: "oj_judge".to_owned(),
+                lane,
+            },
+            retry_policy: JobRetryPolicy {
                 max_attempts: 3,
                 retry_delay_ms: 1_000,
             },
-            payload: RuntimeTaskPayload::OjJudge(OjJudgeTask {
-                submission_id: submission.submission.submission_id,
-                problem_id: problem.problem_id,
-                user_id: submission.submission.user_id,
-                language: submission.submission.language,
-                judge_mode: map_runtime_judge_mode(&problem.judge_mode)?,
-                sandbox_kind: map_runtime_sandbox_kind(problem.sandbox_kind),
-                source_code: submission.source_code,
-                limits: RuntimeLimits {
-                    time_limit_ms: limits.time_limit_ms,
-                    memory_limit_kb: limits.memory_limit_kb,
-                },
-                testcases: problem
-                    .testcases
-                    .into_iter()
-                    .map(|testcase| RuntimeTestcase {
-                        case_no: testcase.case_no,
-                        input: testcase.input,
-                        expected_output: testcase.expected_output,
-                        score: testcase.score,
-                    })
-                    .collect(),
-                judge_config: problem.judge_config.map(map_runtime_judge_config),
-            }),
-        })
+        }))
     }
 
     pub async fn judge_easy_submission(

@@ -28,8 +28,10 @@ pub struct RuntimeConfig {
     pub seccomp_mode: RuntimeSeccompMode,
     pub syscall_flavor: RuntimeSyscallFlavor,
     pub syscall_arch: RuntimeSyscallArch,
-    pub queue_backend: RuntimeQueueBackend,
+    pub broker_backend: RuntimeBrokerBackend,
     pub rabbitmq: RabbitMqRuntimeConfig,
+    pub nats: NatsRuntimeConfig,
+    pub redis_streams: RedisStreamsRuntimeConfig,
     pub worker_groups: Vec<RuntimeWorkerGroupConfig>,
 }
 
@@ -43,6 +45,24 @@ pub struct RabbitMqRuntimeConfig {
     pub url: String,
     pub exchange: String,
     pub queue_prefix: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NatsRuntimeConfig {
+    pub url: String,
+    pub stream_name: String,
+    pub subject_prefix: String,
+    pub consumer_prefix: String,
+    pub ack_wait_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RedisStreamsRuntimeConfig {
+    pub url: String,
+    pub stream_prefix: String,
+    pub consumer_group_prefix: String,
+    pub consumer_name_prefix: String,
+    pub pending_reclaim_idle_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,18 +98,22 @@ impl AppProcessRole {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeQueueBackend {
+pub enum RuntimeBrokerBackend {
     Memory,
     RabbitMq,
+    Nats,
+    RedisStreams,
 }
 
-impl RuntimeQueueBackend {
+impl RuntimeBrokerBackend {
     fn from_env(value: &str) -> AppResult<Self> {
         match value {
             "memory" => Ok(Self::Memory),
             "rabbitmq" => Ok(Self::RabbitMq),
+            "nats" => Ok(Self::Nats),
+            "redis_streams" => Ok(Self::RedisStreams),
             other => Err(AppError::InvalidConfig(format!(
-                "NEXUS_RUNTIME_QUEUE_BACKEND must be 'memory' or 'rabbitmq', got: {other}"
+                "NEXUS_RUNTIME_BROKER_BACKEND must be 'memory', 'rabbitmq', 'nats', or 'redis_streams', got: {other}"
             ))),
         }
     }
@@ -240,8 +264,9 @@ impl AppConfig {
                 syscall_arch: RuntimeSyscallArch::from_env(
                     &env::var("NEXUS_RUNTIME_SYSCALL_ARCH").unwrap_or_else(|_| "auto".to_owned()),
                 )?,
-                queue_backend: RuntimeQueueBackend::from_env(
-                    &env::var("NEXUS_RUNTIME_QUEUE_BACKEND")
+                broker_backend: RuntimeBrokerBackend::from_env(
+                    &env::var("NEXUS_RUNTIME_BROKER_BACKEND")
+                        .or_else(|_| env::var("NEXUS_RUNTIME_QUEUE_BACKEND"))
                         .unwrap_or_else(|_| "memory".to_owned()),
                 )?,
                 rabbitmq: RabbitMqRuntimeConfig {
@@ -251,6 +276,45 @@ impl AppConfig {
                         .unwrap_or_else(|_| "nexus.runtime".to_owned()),
                     queue_prefix: env::var("NEXUS_RUNTIME_RABBITMQ_QUEUE_PREFIX")
                         .unwrap_or_else(|_| "nexus.runtime".to_owned()),
+                },
+                nats: NatsRuntimeConfig {
+                    url: env::var("NEXUS_RUNTIME_NATS_URL")
+                        .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_owned()),
+                    stream_name: env::var("NEXUS_RUNTIME_NATS_STREAM")
+                        .unwrap_or_else(|_| "NEXUS_RUNTIME".to_owned()),
+                    subject_prefix: env::var("NEXUS_RUNTIME_NATS_SUBJECT_PREFIX")
+                        .unwrap_or_else(|_| "nexus.runtime".to_owned()),
+                    consumer_prefix: env::var("NEXUS_RUNTIME_NATS_CONSUMER_PREFIX")
+                        .unwrap_or_else(|_| "nexus-runtime".to_owned()),
+                    ack_wait_ms: env::var("NEXUS_RUNTIME_NATS_ACK_WAIT_MS")
+                        .unwrap_or_else(|_| "30000".to_owned())
+                        .parse()
+                        .map_err(|err| {
+                            AppError::InvalidConfig(format!(
+                                "NEXUS_RUNTIME_NATS_ACK_WAIT_MS: {err}"
+                            ))
+                        })?,
+                },
+                redis_streams: RedisStreamsRuntimeConfig {
+                    url: env::var("NEXUS_RUNTIME_REDIS_STREAMS_URL")
+                        .or_else(|_| env::var("NEXUS_REDIS_URL"))
+                        .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_owned()),
+                    stream_prefix: env::var("NEXUS_RUNTIME_REDIS_STREAMS_PREFIX")
+                        .unwrap_or_else(|_| "nexus.runtime".to_owned()),
+                    consumer_group_prefix: env::var("NEXUS_RUNTIME_REDIS_STREAMS_GROUP_PREFIX")
+                        .unwrap_or_else(|_| "nexus-runtime".to_owned()),
+                    consumer_name_prefix: env::var("NEXUS_RUNTIME_REDIS_STREAMS_CONSUMER_PREFIX")
+                        .unwrap_or_else(|_| "nexus-runtime".to_owned()),
+                    pending_reclaim_idle_ms: env::var(
+                        "NEXUS_RUNTIME_REDIS_STREAMS_PENDING_RECLAIM_IDLE_MS",
+                    )
+                    .unwrap_or_else(|_| "1000".to_owned())
+                    .parse()
+                    .map_err(|err| {
+                        AppError::InvalidConfig(format!(
+                            "NEXUS_RUNTIME_REDIS_STREAMS_PENDING_RECLAIM_IDLE_MS: {err}"
+                        ))
+                    })?,
                 },
                 worker_groups: runtime_worker_groups_from_env(
                     env::var("NEXUS_RUNTIME_WORKER_GROUPS").ok().as_deref(),

@@ -10,9 +10,10 @@ use nexus_shared::AppResult;
 use serde::Deserialize;
 
 use crate::{
-    RuntimeDeadLetterRecord, RuntimeNodeStatus, RuntimeQueueReceipt, RuntimeQueueStats,
-    RuntimeSimulationReport, RuntimeTask, RuntimeTaskService, RuntimeTaskSnapshot,
-    RuntimeWorkerGroup,
+    runtime_management_runbooks, RuntimeBrokerManagementRunbookLink, RuntimeBrokerManagementView,
+    RuntimeBrokerObservabilityStatus, RuntimeDeadLetterRecord, RuntimeDeadLetterReplayRecord,
+    RuntimeNodeStatus, RuntimeQueueReceipt, RuntimeQueueStats, RuntimeSimulationReport,
+    RuntimeTask, RuntimeTaskService, RuntimeTaskSnapshot, RuntimeWorkerGroup,
 };
 
 #[derive(Clone)]
@@ -25,6 +26,10 @@ struct RuntimeRouteFilterQuery {
     queue: Option<String>,
     lane: Option<String>,
     group: Option<String>,
+    task_id: Option<String>,
+    delivery_id: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 pub fn build_router(service: Arc<RuntimeTaskService>) -> Router {
@@ -33,9 +38,22 @@ pub fn build_router(service: Arc<RuntimeTaskService>) -> Router {
         .route("/api/v1/runtime/tasks/schedule", post(schedule_task))
         .route("/api/v1/runtime/tasks/:task_id", get(get_task))
         .route("/api/v1/runtime/node", get(get_runtime_node))
+        .route("/api/v1/runtime/broker", get(get_runtime_broker))
+        .route(
+            "/api/v1/runtime/management/broker",
+            get(get_runtime_broker_management),
+        )
+        .route(
+            "/api/v1/runtime/management/runbooks",
+            get(get_runtime_management_runbooks),
+        )
         .route("/api/v1/runtime/queues/stats", get(get_queue_stats))
         .route("/api/v1/runtime/worker-groups", get(get_worker_groups))
         .route("/api/v1/runtime/queues/dead-letters", get(get_dead_letters))
+        .route(
+            "/api/v1/runtime/queues/replays",
+            get(get_dead_letter_replays),
+        )
         .route(
             "/api/v1/runtime/queues/dead-letters/:delivery_id/replay",
             post(replay_dead_letter),
@@ -85,6 +103,69 @@ async fn get_runtime_node(State(state): State<RuntimeState>) -> AppResult<Json<R
     Ok(Json(state.service.node_status()))
 }
 
+async fn get_runtime_broker(
+    State(state): State<RuntimeState>,
+) -> AppResult<Json<RuntimeBrokerObservabilityStatus>> {
+    Ok(Json(state.service.broker_status()))
+}
+
+async fn get_runtime_broker_management(
+    Query(filter): Query<RuntimeRouteFilterQuery>,
+    State(state): State<RuntimeState>,
+) -> AppResult<Json<RuntimeBrokerManagementView>> {
+    let mut view = state.service.broker_management_view().await?;
+    view.queue_stats = view
+        .queue_stats
+        .into_iter()
+        .filter(|stat| matches_route(stat.queue.as_str(), stat.lane.as_str(), &filter))
+        .collect();
+    let filtered_dead_letters: Vec<_> = view
+        .dead_letters
+        .into_iter()
+        .filter(|record| {
+            matches_route(record.queue.as_str(), record.lane.as_str(), &filter)
+                && matches_record_identity(
+                    record.delivery_id.as_str(),
+                    record.task_id.as_str(),
+                    &filter,
+                )
+        })
+        .collect();
+    let filtered_replays: Vec<_> = view
+        .replay_history
+        .into_iter()
+        .filter(|record| {
+            matches_route(record.queue.as_str(), record.lane.as_str(), &filter)
+                && matches_record_identity(
+                    record.delivery_id.as_str(),
+                    record.task_id.as_str(),
+                    &filter,
+                )
+        })
+        .collect();
+    let replay_history_total = filtered_replays.len();
+    view.dead_letters = paginate(filtered_dead_letters.clone(), &filter);
+    view.replay_history = paginate(filtered_replays, &filter);
+    view.worker_groups = view
+        .worker_groups
+        .into_iter()
+        .filter(|group| matches_group_filter(group, &filter))
+        .collect();
+    view.summary.queue_count = view.queue_stats.len();
+    view.summary.queued = view.queue_stats.iter().map(|item| item.queued).sum();
+    view.summary.leased = view.queue_stats.iter().map(|item| item.leased).sum();
+    view.summary.dead_lettered = view.queue_stats.iter().map(|item| item.dead_lettered).sum();
+    view.summary.dead_letter_records_total = filtered_dead_letters.len();
+    view.summary.replay_history_total = replay_history_total;
+    view.summary.replayed = view.summary.replay_history_total;
+    Ok(Json(view))
+}
+
+async fn get_runtime_management_runbooks(
+) -> AppResult<Json<Vec<RuntimeBrokerManagementRunbookLink>>> {
+    Ok(Json(runtime_management_runbooks()))
+}
+
 async fn get_worker_groups(
     Query(filter): Query<RuntimeRouteFilterQuery>,
     State(state): State<RuntimeState>,
@@ -107,7 +188,14 @@ async fn get_dead_letters(
         .dead_letters()
         .await?
         .into_iter()
-        .filter(|record| matches_route(record.queue.as_str(), record.lane.as_str(), &filter))
+        .filter(|record| {
+            matches_route(record.queue.as_str(), record.lane.as_str(), &filter)
+                && matches_record_identity(
+                    record.delivery_id.as_str(),
+                    record.task_id.as_str(),
+                    &filter,
+                )
+        })
         .collect();
     Ok(Json(dead_letters))
 }
@@ -117,6 +205,27 @@ async fn replay_dead_letter(
     State(state): State<RuntimeState>,
 ) -> AppResult<Json<RuntimeQueueReceipt>> {
     Ok(Json(state.service.replay_dead_letter(&delivery_id).await?))
+}
+
+async fn get_dead_letter_replays(
+    Query(filter): Query<RuntimeRouteFilterQuery>,
+    State(state): State<RuntimeState>,
+) -> AppResult<Json<Vec<RuntimeDeadLetterReplayRecord>>> {
+    let mut records: Vec<_> = state
+        .service
+        .replay_history()
+        .into_iter()
+        .filter(|record| {
+            matches_route(record.queue.as_str(), record.lane.as_str(), &filter)
+                && matches_record_identity(
+                    record.delivery_id.as_str(),
+                    record.task_id.as_str(),
+                    &filter,
+                )
+        })
+        .collect();
+    records.sort_by(|left, right| right.replayed_at_ms.cmp(&left.replayed_at_ms));
+    Ok(Json(paginate(records, &filter)))
 }
 
 fn matches_route(queue: &str, lane: &str, filter: &RuntimeRouteFilterQuery) -> bool {
@@ -140,9 +249,33 @@ fn matches_group_filter(group: &RuntimeWorkerGroup, filter: &RuntimeRouteFilterQ
     group_matches && route_matches
 }
 
+fn matches_record_identity(
+    delivery_id: &str,
+    task_id: &str,
+    filter: &RuntimeRouteFilterQuery,
+) -> bool {
+    filter
+        .delivery_id
+        .as_deref()
+        .map_or(true, |value| value == delivery_id)
+        && filter
+            .task_id
+            .as_deref()
+            .map_or(true, |value| value == task_id)
+}
+
+fn paginate<T>(items: Vec<T>, filter: &RuntimeRouteFilterQuery) -> Vec<T> {
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    items.into_iter().skip(offset).take(limit).collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{matches_group_filter, matches_route, RuntimeRouteFilterQuery};
+    use super::{
+        matches_group_filter, matches_record_identity, matches_route, paginate,
+        RuntimeRouteFilterQuery,
+    };
     use crate::{RuntimeRouteBinding, RuntimeWorkerGroup};
 
     #[test]
@@ -151,6 +284,10 @@ mod tests {
             queue: Some("oj_judge".to_owned()),
             lane: Some("fast".to_owned()),
             group: None,
+            task_id: None,
+            delivery_id: None,
+            limit: None,
+            offset: None,
         };
 
         assert!(matches_route("oj_judge", "fast", &filter));
@@ -174,6 +311,10 @@ mod tests {
                 queue: Some("oj_judge".to_owned()),
                 lane: Some("fast".to_owned()),
                 group: Some("oj-fast".to_owned()),
+                task_id: None,
+                delivery_id: None,
+                limit: None,
+                offset: None,
             }
         ));
         assert!(!matches_group_filter(
@@ -182,7 +323,46 @@ mod tests {
                 queue: Some("oj_judge".to_owned()),
                 lane: Some("heavy".to_owned()),
                 group: None,
+                task_id: None,
+                delivery_id: None,
+                limit: None,
+                offset: None,
             }
         ));
+    }
+
+    #[test]
+    fn record_identity_filter_matches_delivery_and_task() {
+        let filter = RuntimeRouteFilterQuery {
+            queue: None,
+            lane: None,
+            group: None,
+            task_id: Some("task-1".to_owned()),
+            delivery_id: Some("dlv-1".to_owned()),
+            limit: None,
+            offset: None,
+        };
+
+        assert!(matches_record_identity("dlv-1", "task-1", &filter));
+        assert!(!matches_record_identity("dlv-2", "task-1", &filter));
+        assert!(!matches_record_identity("dlv-1", "task-2", &filter));
+    }
+
+    #[test]
+    fn pagination_applies_offset_and_limit() {
+        let items = vec![1, 2, 3, 4, 5];
+        let page = paginate(
+            items,
+            &RuntimeRouteFilterQuery {
+                queue: None,
+                lane: None,
+                group: None,
+                task_id: None,
+                delivery_id: None,
+                limit: Some(2),
+                offset: Some(1),
+            },
+        );
+        assert_eq!(page, vec![2, 3]);
     }
 }

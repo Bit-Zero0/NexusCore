@@ -23,7 +23,8 @@ pub use language::{
     build_default_catalog, CodeTemplateRequest, LanguageCatalog, LanguageDescriptor, LanguageKey,
     LanguageSpec, SandboxProfile, SeccompPolicy,
 };
-use nexus_runtime::{RuntimeTask, RuntimeTaskService};
+use nexus_jobs::JobPlatformService;
+use nexus_runtime::RuntimeTask;
 use nexus_shared::{AppError, AppResult};
 pub use repository::{ProblemRepository, SubmissionRepository};
 
@@ -31,13 +32,13 @@ pub use repository::{ProblemRepository, SubmissionRepository};
 struct OjState {
     catalog: Arc<LanguageCatalog>,
     service: Arc<OjService>,
-    runtime_service: Option<Arc<RuntimeTaskService>>,
+    job_platform_service: Option<Arc<JobPlatformService>>,
 }
 
 pub fn build_router(
     catalog: Arc<LanguageCatalog>,
     service: Arc<OjService>,
-    runtime_service: Option<Arc<RuntimeTaskService>>,
+    job_platform_service: Option<Arc<JobPlatformService>>,
 ) -> Router {
     Router::new()
         .route("/api/v1/oj/catalog/languages", get(list_languages))
@@ -68,7 +69,7 @@ pub fn build_router(
         .with_state(OjState {
             catalog,
             service,
-            runtime_service,
+            job_platform_service,
         })
 }
 
@@ -144,12 +145,12 @@ async fn create_submission(
 ) -> AppResult<Json<SubmissionRecord>> {
     let submission = state.service.create_submission(draft).await?;
 
-    if let Some(runtime_service) = &state.runtime_service {
-        let task = state
+    if let Some(job_platform_service) = &state.job_platform_service {
+        let job = state
             .service
-            .build_runtime_task(&submission.submission_id.0)
+            .build_job_definition(&submission.submission_id.0)
             .await?;
-        runtime_service.schedule(task).await?;
+        job_platform_service.submit(job).await?;
     }
 
     Ok(Json(submission))
@@ -193,6 +194,11 @@ mod tests {
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
+    };
+    use nexus_jobs::{
+        oj_judge_job_handler, DefaultJobSubmissionValidator, InMemoryJobDefinitionStore,
+        InMemoryJobEventStore, InMemoryJobHandlerRegistry, JobHandlerRegistry, JobPlatformService,
+        RuntimeBackedJobSubmitter,
     };
     use nexus_runtime::{
         build_default_runtime_catalog, InMemoryRuntimeTaskQueue, NoopRuntimeEventObserver,
@@ -410,7 +416,7 @@ mod tests {
         let router = build_router(
             build_default_catalog(),
             service,
-            Some(runtime_service.clone()),
+            Some(build_job_platform_service(runtime_service.clone())),
         );
 
         let body = serde_json::json!({
@@ -697,5 +703,21 @@ mod tests {
             execution_id: Some("rt-http-1".to_owned()),
             outcome,
         }
+    }
+
+    fn build_job_platform_service(
+        runtime_service: Arc<RuntimeTaskService>,
+    ) -> Arc<JobPlatformService> {
+        let handler_registry = Arc::new(InMemoryJobHandlerRegistry::default());
+        handler_registry.register_handler(oj_judge_job_handler());
+        Arc::new(JobPlatformService::new(
+            Arc::new(RuntimeBackedJobSubmitter::new(
+                runtime_service,
+                handler_registry.clone(),
+            )),
+            Arc::new(DefaultJobSubmissionValidator::new(handler_registry)),
+            Arc::new(InMemoryJobDefinitionStore::default()),
+            Arc::new(InMemoryJobEventStore::default()),
+        ))
     }
 }

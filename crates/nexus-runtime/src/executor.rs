@@ -12,13 +12,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use ulid::Ulid;
 
 use nexus_shared::{AppError, AppResult};
 
 use crate::{
+    broker::{EnhancedBrokerCapabilities, RequiredBrokerCapabilities, MEMORY_BROKER_CAPABILITIES},
     judge::{validate_output, CaseJudgeStatus},
+    metrics::broker_failure_health_snapshot,
+    observe_broker_dead_letter, observe_broker_operation, observe_broker_operation_failure,
+    observe_broker_replay, observe_broker_retry,
     planning::{
         resolve_native_cpp_compiler, resolve_python_runtime, resolve_rustc_binary, rustc_mounts,
         RuntimeExecutionBackend, RuntimeExecutionPlan, RuntimeLanguageCatalog,
@@ -848,6 +852,231 @@ pub struct RuntimeNodeStatus {
     pub last_heartbeat_ms: u64,
     pub node_status: RuntimeNodeHealthStatus,
     pub worker_groups: Vec<RuntimeWorkerGroup>,
+    pub broker: RuntimeBrokerObservabilityStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeBrokerObservabilityStatus {
+    pub broker: String,
+    pub required_capabilities: RequiredBrokerCapabilities,
+    pub enhanced_capabilities: EnhancedBrokerCapabilities,
+    pub ack_wait_ms: Option<u64>,
+    pub pending_reclaim_idle_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeDeadLetterReplayRecord {
+    pub delivery_id: String,
+    pub task_id: String,
+    pub queue: String,
+    pub lane: String,
+    pub replayed_at_ms: u64,
+    pub status: RuntimeTaskLifecycleStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeBrokerManagementSummary {
+    pub queue_count: usize,
+    pub queued: usize,
+    pub leased: usize,
+    pub dead_lettered: usize,
+    pub replayed: usize,
+    pub dead_letter_records_total: usize,
+    pub replay_history_total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeBrokerHealthState {
+    Healthy,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeBrokerDegradationReason {
+    RecoveryWindowActive,
+    PersistentFailuresDetected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeBrokerManagementAlertSeverity {
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeBrokerManagementActionKind {
+    ObserveRecovery,
+    InspectBrokerLogs,
+    CheckBrokerConnectivity,
+    OpenRunbook,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeBrokerManagementRunbookLink {
+    pub runbook_ref: String,
+    pub title: String,
+    pub doc_path: String,
+    pub section_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeBrokerManagementRecommendedAction {
+    pub label: String,
+    pub action_kind: RuntimeBrokerManagementActionKind,
+    pub runbook_ref: Option<String>,
+    pub runbook: Option<RuntimeBrokerManagementRunbookLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeBrokerManagementAlert {
+    pub code: String,
+    pub severity: RuntimeBrokerManagementAlertSeverity,
+    pub reason: RuntimeBrokerDegradationReason,
+    pub message: String,
+    pub recommended_action: Option<RuntimeBrokerManagementRecommendedAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeBrokerManagementHealth {
+    pub status: RuntimeBrokerHealthState,
+    pub degradation_reasons: Vec<RuntimeBrokerDegradationReason>,
+    pub alerts: Vec<RuntimeBrokerManagementAlert>,
+    pub recovery_window_active: bool,
+    pub persistent_failures_detected: bool,
+    pub last_failure_at_ms: Option<u64>,
+    pub recent_failure_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeBrokerManagementView {
+    pub node: RuntimeNodeStatus,
+    pub broker: RuntimeBrokerObservabilityStatus,
+    pub health: RuntimeBrokerManagementHealth,
+    pub runbooks: Vec<RuntimeBrokerManagementRunbookLink>,
+    pub worker_groups: Vec<RuntimeWorkerGroup>,
+    pub queue_stats: Vec<RuntimeQueueStats>,
+    pub dead_letters: Vec<RuntimeDeadLetterRecord>,
+    pub replay_history: Vec<RuntimeDeadLetterReplayRecord>,
+    pub summary: RuntimeBrokerManagementSummary,
+}
+
+impl RuntimeBrokerObservabilityStatus {
+    pub fn from_capability_profile(
+        broker: impl Into<String>,
+        required_capabilities: RequiredBrokerCapabilities,
+        enhanced_capabilities: EnhancedBrokerCapabilities,
+    ) -> Self {
+        Self {
+            broker: broker.into(),
+            required_capabilities,
+            enhanced_capabilities,
+            ack_wait_ms: None,
+            pending_reclaim_idle_ms: None,
+        }
+    }
+
+    pub fn with_ack_wait_ms(mut self, ack_wait_ms: Option<u64>) -> Self {
+        self.ack_wait_ms = ack_wait_ms;
+        self
+    }
+
+    pub fn with_pending_reclaim_idle_ms(mut self, pending_reclaim_idle_ms: Option<u64>) -> Self {
+        self.pending_reclaim_idle_ms = pending_reclaim_idle_ms;
+        self
+    }
+
+    pub fn memory() -> Self {
+        Self::from_capability_profile(
+            MEMORY_BROKER_CAPABILITIES.broker,
+            MEMORY_BROKER_CAPABILITIES.required,
+            MEMORY_BROKER_CAPABILITIES.enhanced,
+        )
+    }
+}
+
+fn build_broker_management_health(
+    health_snapshot: crate::metrics::BrokerFailureHealthSnapshot,
+) -> RuntimeBrokerManagementHealth {
+    let mut degradation_reasons = Vec::new();
+    let mut alerts = Vec::new();
+
+    if health_snapshot.recovery_window_active {
+        degradation_reasons.push(RuntimeBrokerDegradationReason::RecoveryWindowActive);
+        alerts.push(RuntimeBrokerManagementAlert {
+            code: "broker_recovery_window_active".to_owned(),
+            severity: RuntimeBrokerManagementAlertSeverity::Warning,
+            reason: RuntimeBrokerDegradationReason::RecoveryWindowActive,
+            message: "broker is still inside the recent recovery window after an operation failure"
+                .to_owned(),
+            recommended_action: Some(RuntimeBrokerManagementRecommendedAction {
+                label: "Watch broker recovery and confirm failures stop increasing".to_owned(),
+                action_kind: RuntimeBrokerManagementActionKind::ObserveRecovery,
+                runbook_ref: Some("p0.broker-recovery-window".to_owned()),
+                runbook: runtime_management_runbook("p0.broker-recovery-window"),
+            }),
+        });
+    }
+
+    if health_snapshot.persistent_failures_detected {
+        degradation_reasons.push(RuntimeBrokerDegradationReason::PersistentFailuresDetected);
+        alerts.push(RuntimeBrokerManagementAlert {
+            code: "broker_persistent_failures_detected".to_owned(),
+            severity: RuntimeBrokerManagementAlertSeverity::Critical,
+            reason: RuntimeBrokerDegradationReason::PersistentFailuresDetected,
+            message: format!(
+                "broker observed {} failures inside the recent health window",
+                health_snapshot.recent_failure_count
+            ),
+            recommended_action: Some(RuntimeBrokerManagementRecommendedAction {
+                label: "Inspect broker logs and connectivity, then review dead-letter replay after recovery"
+                    .to_owned(),
+                action_kind: RuntimeBrokerManagementActionKind::InspectBrokerLogs,
+                runbook_ref: Some("p0.broker-persistent-failures".to_owned()),
+                runbook: runtime_management_runbook("p0.broker-persistent-failures"),
+            }),
+        });
+    }
+
+    RuntimeBrokerManagementHealth {
+        status: if degradation_reasons.is_empty() {
+            RuntimeBrokerHealthState::Healthy
+        } else {
+            RuntimeBrokerHealthState::Degraded
+        },
+        degradation_reasons,
+        alerts,
+        recovery_window_active: health_snapshot.recovery_window_active,
+        persistent_failures_detected: health_snapshot.persistent_failures_detected,
+        last_failure_at_ms: health_snapshot.last_failure_at_ms,
+        recent_failure_count: health_snapshot.recent_failure_count,
+    }
+}
+
+pub fn runtime_management_runbooks() -> Vec<RuntimeBrokerManagementRunbookLink> {
+    vec![
+        RuntimeBrokerManagementRunbookLink {
+            runbook_ref: "p0.broker-recovery-window".to_owned(),
+            title: "Broker recovery window handling".to_owned(),
+            doc_path: "P0_生产稳定性与运维闭环_Runbook.md".to_owned(),
+            section_ref: "broker-recovery-window".to_owned(),
+        },
+        RuntimeBrokerManagementRunbookLink {
+            runbook_ref: "p0.broker-persistent-failures".to_owned(),
+            title: "Broker persistent failure handling".to_owned(),
+            doc_path: "P0_生产稳定性与运维闭环_Runbook.md".to_owned(),
+            section_ref: "broker-persistent-failures".to_owned(),
+        },
+    ]
+}
+
+fn runtime_management_runbook(runbook_ref: &str) -> Option<RuntimeBrokerManagementRunbookLink> {
+    runtime_management_runbooks()
+        .into_iter()
+        .find(|item| item.runbook_ref == runbook_ref)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -928,12 +1157,16 @@ struct QueuedRuntimeTask {
 #[async_trait]
 impl RuntimeTaskQueue for InMemoryRuntimeTaskQueue {
     async fn enqueue(&self, task: RuntimeTask) -> AppResult<()> {
+        let queue = task.queue.clone();
+        let lane = task.lane.clone();
         self.enqueue_internal(QueuedRuntimeTask {
             task,
             attempt: 1,
             available_at: SystemTime::now(),
             last_error: None,
-        })
+        })?;
+        observe_broker_operation("memory", queue.as_str(), lane.as_str(), "enqueue");
+        Ok(())
     }
 
     async fn reserve(&self, bindings: &[RuntimeRouteBinding]) -> Option<RuntimeTaskDelivery> {
@@ -977,16 +1210,31 @@ impl RuntimeTaskQueue for InMemoryRuntimeTaskQueue {
                 .lock()
                 .ok()?
                 .insert(delivery.delivery_id.clone(), delivery.clone());
+            observe_broker_operation(
+                "memory",
+                delivery.task.queue.as_str(),
+                delivery.task.lane.as_str(),
+                "reserve",
+            );
             return Some(delivery);
         }
         None
     }
 
     async fn ack(&self, delivery_id: &str) -> AppResult<()> {
-        self.leased
+        let removed = self
+            .leased
             .lock()
             .map_err(|_| AppError::Internal)?
             .remove(delivery_id);
+        if let Some(delivery) = removed {
+            observe_broker_operation(
+                "memory",
+                delivery.task.queue.as_str(),
+                delivery.task.lane.as_str(),
+                "ack",
+            );
+        }
         Ok(())
     }
 
@@ -1001,9 +1249,24 @@ impl RuntimeTaskQueue for InMemoryRuntimeTaskQueue {
             .lock()
             .map_err(|_| AppError::Internal)?
             .remove(delivery_id)
-            .ok_or(AppError::Internal)?;
+            .ok_or_else(|| {
+                observe_broker_operation_failure("memory", "*", "*", "retry");
+                AppError::Internal
+            })?;
         if delivery.attempt >= delivery.task.retry_policy.max_attempts {
             let task = delivery.task;
+            observe_broker_retry(
+                "memory",
+                task.queue.as_str(),
+                task.lane.as_str(),
+                "dead_lettered",
+            );
+            observe_broker_dead_letter(
+                "memory",
+                task.queue.as_str(),
+                task.lane.as_str(),
+                "retry_exhausted",
+            );
             self.dead_letters
                 .lock()
                 .map_err(|_| AppError::Internal)?
@@ -1022,6 +1285,8 @@ impl RuntimeTaskQueue for InMemoryRuntimeTaskQueue {
                 });
             return Ok(RetryDisposition::DeadLettered);
         }
+        let queue = delivery.task.queue.clone();
+        let lane = delivery.task.lane.clone();
         self.enqueue_internal(QueuedRuntimeTask {
             task: delivery.task,
             attempt: delivery.attempt + 1,
@@ -1030,6 +1295,7 @@ impl RuntimeTaskQueue for InMemoryRuntimeTaskQueue {
                 .unwrap_or(SystemTime::now()),
             last_error: Some(error.to_owned()),
         })?;
+        observe_broker_retry("memory", queue.as_str(), lane.as_str(), "requeued");
         Ok(RetryDisposition::Requeued)
     }
 
@@ -1041,6 +1307,12 @@ impl RuntimeTaskQueue for InMemoryRuntimeTaskQueue {
             .remove(delivery_id);
         if let Some(delivery) = delivery {
             let task = delivery.task;
+            observe_broker_dead_letter(
+                "memory",
+                task.queue.as_str(),
+                task.lane.as_str(),
+                "rejected",
+            );
             self.dead_letters
                 .lock()
                 .map_err(|_| AppError::Internal)?
@@ -1120,7 +1392,10 @@ impl RuntimeTaskQueue for InMemoryRuntimeTaskQueue {
         let position = dead_letters
             .iter()
             .position(|record| record.delivery_id == delivery_id)
-            .ok_or_else(|| AppError::NotFound(format!("dead letter not found: {delivery_id}")))?;
+            .ok_or_else(|| {
+                observe_broker_operation_failure("memory", "*", "*", "replay");
+                AppError::NotFound(format!("dead letter not found: {delivery_id}"))
+            })?;
         let record = dead_letters.remove(position);
         drop(dead_letters);
 
@@ -1130,6 +1405,11 @@ impl RuntimeTaskQueue for InMemoryRuntimeTaskQueue {
             available_at: SystemTime::now(),
             last_error: Some(format!("replayed from dead letter: {}", record.error)),
         })?;
+        observe_broker_replay(
+            "memory",
+            record.task.queue.as_str(),
+            record.task.lane.as_str(),
+        );
 
         Ok(RuntimeQueueReceipt {
             task_id: record.task.task_id,
@@ -1198,13 +1478,13 @@ impl InMemoryRuntimeTaskQueue {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeQueueBackend {
+pub enum RuntimeBrokerBackend {
     Memory,
 }
 
-pub fn build_runtime_queue(backend: RuntimeQueueBackend) -> Arc<dyn RuntimeTaskQueue> {
+pub fn build_runtime_queue(backend: RuntimeBrokerBackend) -> Arc<dyn RuntimeTaskQueue> {
     match backend {
-        RuntimeQueueBackend::Memory => Arc::new(InMemoryRuntimeTaskQueue::default()),
+        RuntimeBrokerBackend::Memory => Arc::new(InMemoryRuntimeTaskQueue::default()),
     }
 }
 
@@ -1212,18 +1492,21 @@ pub fn build_runtime_queue(backend: RuntimeQueueBackend) -> Arc<dyn RuntimeTaskQ
 pub struct RuntimeTaskService {
     worker: Arc<RuntimeWorker>,
     queue: Arc<dyn RuntimeTaskQueue>,
+    broker: RuntimeBrokerObservabilityStatus,
     snapshots: Arc<Mutex<HashMap<String, RuntimeTaskSnapshot>>>,
     observer: Arc<dyn RuntimeEventObserver>,
     worker_groups: Arc<Mutex<Vec<RuntimeWorkerGroup>>>,
     node_id: Arc<Mutex<String>>,
+    replay_history: Arc<Mutex<VecDeque<RuntimeDeadLetterReplayRecord>>>,
     started_at_ms: u64,
 }
 
 impl RuntimeTaskService {
     pub fn new(worker: Arc<RuntimeWorker>, observer: Arc<dyn RuntimeEventObserver>) -> Self {
-        Self::with_queue(
+        Self::with_queue_and_broker(
             worker,
-            build_runtime_queue(RuntimeQueueBackend::Memory),
+            build_runtime_queue(RuntimeBrokerBackend::Memory),
+            RuntimeBrokerObservabilityStatus::memory(),
             observer,
         )
     }
@@ -1233,13 +1516,29 @@ impl RuntimeTaskService {
         queue: Arc<dyn RuntimeTaskQueue>,
         observer: Arc<dyn RuntimeEventObserver>,
     ) -> Self {
+        Self::with_queue_and_broker(
+            worker,
+            queue,
+            RuntimeBrokerObservabilityStatus::memory(),
+            observer,
+        )
+    }
+
+    pub fn with_queue_and_broker(
+        worker: Arc<RuntimeWorker>,
+        queue: Arc<dyn RuntimeTaskQueue>,
+        broker: RuntimeBrokerObservabilityStatus,
+        observer: Arc<dyn RuntimeEventObserver>,
+    ) -> Self {
         Self {
             worker,
             queue,
+            broker,
             snapshots: Arc::new(Mutex::new(HashMap::new())),
             observer,
             worker_groups: Arc::new(Mutex::new(Vec::new())),
             node_id: Arc::new(Mutex::new("runtime-node".to_owned())),
+            replay_history: Arc::new(Mutex::new(VecDeque::new())),
             started_at_ms: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as u64)
@@ -1288,6 +1587,15 @@ impl RuntimeTaskService {
             loop {
                 if let Some(delivery) = queue.reserve(&bindings).await {
                     let task = delivery.task.clone();
+                    info!(
+                        worker_group = %worker_group_name,
+                        task_id = %task.task_id,
+                        queue = %task.queue,
+                        lane = %task.lane,
+                        attempt = delivery.attempt,
+                        delivery_id = %delivery.delivery_id,
+                        "runtime worker reserved task"
+                    );
                     let preparing_snapshot = RuntimeTaskSnapshot {
                         task_id: task.task_id.clone(),
                         source_domain: task.source_domain.clone(),
@@ -1421,6 +1729,15 @@ impl RuntimeTaskService {
                                         ),
                                     )
                                     .await;
+                                    info!(
+                                        worker_group = %worker_group_name,
+                                        task_id = %task.task_id,
+                                        queue = %task.queue,
+                                        lane = %task.lane,
+                                        attempt = delivery.attempt,
+                                        final_status = ?final_snapshot.status,
+                                        "runtime worker finished task"
+                                    );
                                     let _ = queue.ack(&delivery.delivery_id).await;
                                 }
                                 Err(error) => {
@@ -1494,6 +1811,12 @@ impl RuntimeTaskService {
             execution_id: None,
             outcome: None,
         };
+        debug!(
+            task_id = %task.task_id,
+            queue = %task.queue,
+            lane = %task.lane,
+            "runtime task scheduled"
+        );
         self.queue.enqueue(task.clone()).await?;
         tokio::spawn(async move {
             observe_event(&observer, queued_event).await;
@@ -1524,7 +1847,60 @@ impl RuntimeTaskService {
     }
 
     pub async fn replay_dead_letter(&self, delivery_id: &str) -> AppResult<RuntimeQueueReceipt> {
-        self.queue.replay_dead_letter(delivery_id).await
+        let receipt = self.queue.replay_dead_letter(delivery_id).await?;
+        if let Ok(mut history) = self.replay_history.lock() {
+            history.push_back(RuntimeDeadLetterReplayRecord {
+                delivery_id: delivery_id.to_owned(),
+                task_id: receipt.task_id.clone(),
+                queue: receipt.queue.clone(),
+                lane: receipt.lane.clone(),
+                replayed_at_ms: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis() as u64)
+                    .unwrap_or_default(),
+                status: receipt.status.clone(),
+            });
+            while history.len() > 100 {
+                history.pop_front();
+            }
+        }
+        Ok(receipt)
+    }
+
+    pub fn replay_history(&self) -> Vec<RuntimeDeadLetterReplayRecord> {
+        self.replay_history
+            .lock()
+            .map(|history| history.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub async fn broker_management_view(&self) -> AppResult<RuntimeBrokerManagementView> {
+        let queue_stats = self.queue_stats().await?;
+        let dead_letters = self.dead_letters().await?;
+        let replay_history = self.replay_history();
+        let health_snapshot = broker_failure_health_snapshot(self.broker.broker.as_str());
+        let health = build_broker_management_health(health_snapshot);
+        let summary = RuntimeBrokerManagementSummary {
+            queue_count: queue_stats.len(),
+            queued: queue_stats.iter().map(|item| item.queued).sum(),
+            leased: queue_stats.iter().map(|item| item.leased).sum(),
+            dead_lettered: queue_stats.iter().map(|item| item.dead_lettered).sum(),
+            replayed: replay_history.len(),
+            dead_letter_records_total: dead_letters.len(),
+            replay_history_total: replay_history.len(),
+        };
+
+        Ok(RuntimeBrokerManagementView {
+            node: self.node_status(),
+            broker: self.broker_status(),
+            health,
+            runbooks: runtime_management_runbooks(),
+            worker_groups: self.worker_groups(),
+            queue_stats,
+            dead_letters,
+            replay_history,
+            summary,
+        })
     }
 
     pub fn worker_groups(&self) -> Vec<RuntimeWorkerGroup> {
@@ -1532,6 +1908,10 @@ impl RuntimeTaskService {
             .lock()
             .map(|groups| groups.clone())
             .unwrap_or_default()
+    }
+
+    pub fn broker_status(&self) -> RuntimeBrokerObservabilityStatus {
+        self.broker.clone()
     }
 
     pub fn node_status(&self) -> RuntimeNodeStatus {
@@ -1549,7 +1929,72 @@ impl RuntimeTaskService {
             last_heartbeat_ms: now_ms,
             node_status: RuntimeNodeHealthStatus::Healthy,
             worker_groups: self.worker_groups(),
+            broker: self.broker_status(),
         }
+    }
+}
+
+#[cfg(test)]
+mod management_health_tests {
+    use super::{
+        build_broker_management_health, RuntimeBrokerDegradationReason, RuntimeBrokerHealthState,
+        RuntimeBrokerManagementActionKind, RuntimeBrokerManagementAlertSeverity,
+    };
+    use crate::metrics::BrokerFailureHealthSnapshot;
+
+    #[test]
+    fn broker_management_health_reports_degradation_reasons_and_alerts() {
+        let health = build_broker_management_health(BrokerFailureHealthSnapshot {
+            last_failure_at_ms: Some(123),
+            recent_failure_count: 4,
+            recovery_window_active: true,
+            persistent_failures_detected: true,
+        });
+
+        assert!(matches!(health.status, RuntimeBrokerHealthState::Degraded));
+        assert_eq!(health.degradation_reasons.len(), 2);
+        assert!(health
+            .degradation_reasons
+            .iter()
+            .any(|reason| matches!(reason, RuntimeBrokerDegradationReason::RecoveryWindowActive)));
+        assert!(health.degradation_reasons.iter().any(|reason| matches!(
+            reason,
+            RuntimeBrokerDegradationReason::PersistentFailuresDetected
+        )));
+        assert_eq!(health.alerts.len(), 2);
+        assert!(health.alerts.iter().any(|alert| matches!(
+            alert.severity,
+            RuntimeBrokerManagementAlertSeverity::Warning
+        )));
+        assert!(health.alerts.iter().any(|alert| matches!(
+            alert.severity,
+            RuntimeBrokerManagementAlertSeverity::Critical
+        )));
+        assert!(health.alerts.iter().all(|alert| {
+            alert.recommended_action.as_ref().is_some_and(|action| {
+                !action.label.is_empty()
+                    && action
+                        .runbook_ref
+                        .as_ref()
+                        .is_some_and(|value| !value.is_empty())
+            })
+        }));
+        assert!(health.alerts.iter().any(|alert| {
+            alert.recommended_action.as_ref().is_some_and(|action| {
+                matches!(
+                    action.action_kind,
+                    RuntimeBrokerManagementActionKind::ObserveRecovery
+                )
+            })
+        }));
+        assert!(health.alerts.iter().any(|alert| {
+            alert.recommended_action.as_ref().is_some_and(|action| {
+                matches!(
+                    action.action_kind,
+                    RuntimeBrokerManagementActionKind::InspectBrokerLogs
+                )
+            })
+        }));
     }
 }
 
@@ -1724,6 +2169,15 @@ async fn handle_delivery_failure(
         )
         .await
         .unwrap_or(RetryDisposition::DeadLettered);
+    warn!(
+        task_id = %task.task_id,
+        queue = %task.queue,
+        lane = %task.lane,
+        attempt,
+        disposition = ?disposition,
+        error = %error_message,
+        "runtime delivery failed"
+    );
 
     let (status, message) = match disposition {
         RetryDisposition::Requeued => (
@@ -2585,18 +3039,18 @@ fn syscall_group_expansion(
         SyscallGroup::PythonRuntimeExtras => match flavor {
             RuntimeSyscallFlavor::DebianUbuntu => {
                 let mut syscalls = vec![
-                "dup",
-                "dup2",
-                "getcwd",
-                "getdents64",
-                "getegid",
-                "geteuid",
-                "getgid",
-                "gettid",
-                "getuid",
-                "pipe2",
-                "readlink",
-                "sysinfo",
+                    "dup",
+                    "dup2",
+                    "getcwd",
+                    "getdents64",
+                    "getegid",
+                    "geteuid",
+                    "getgid",
+                    "gettid",
+                    "getuid",
+                    "pipe2",
+                    "readlink",
+                    "sysinfo",
                 ];
                 if arch == RuntimeSyscallArch::Aarch64 {
                     syscalls.retain(|&s| !matches!(s, "getdents64" | "pipe2"));
@@ -3642,10 +4096,14 @@ fn main() {
             "unexpected outcome:\n{}",
             outcome_debug(&outcome)
         );
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::Accepted
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::Accepted
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3679,10 +4137,14 @@ int main() {
             "unexpected outcome:\n{}",
             outcome_debug(&outcome)
         );
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::Accepted
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::Accepted
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3770,10 +4232,14 @@ fn main() {
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::MemoryLimitExceeded
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::MemoryLimitExceeded
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3798,10 +4264,14 @@ int main() {
         ))
         .await;
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::SecurityViolation
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::SecurityViolation
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3824,10 +4294,14 @@ int main() {
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::TimeLimitExceeded
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::TimeLimitExceeded
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3870,10 +4344,14 @@ int main() {
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::SecurityViolation
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::SecurityViolation
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3896,10 +4374,14 @@ int main() {
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::TimeLimitExceeded
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::TimeLimitExceeded
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3925,12 +4407,16 @@ int main() {
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::SecurityViolation
-                | super::RuntimeCaseFinalStatus::RuntimeError
-                | super::RuntimeCaseFinalStatus::TimeLimitExceeded
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::SecurityViolation
+                    | super::RuntimeCaseFinalStatus::RuntimeError
+                    | super::RuntimeCaseFinalStatus::TimeLimitExceeded
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -3952,11 +4438,15 @@ int main() {
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::SecurityViolation
-                | super::RuntimeCaseFinalStatus::RuntimeError
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::SecurityViolation
+                    | super::RuntimeCaseFinalStatus::RuntimeError
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
         assert!(
             !outcome.cases[0].stdout_excerpt.contains("pwned"),
             "unexpected outcome:\n{}",
@@ -3986,11 +4476,15 @@ fn main() {
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::SecurityViolation
-                | super::RuntimeCaseFinalStatus::RuntimeError
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::SecurityViolation
+                    | super::RuntimeCaseFinalStatus::RuntimeError
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
         assert!(
             !outcome.cases[0].stdout_excerpt.contains("pwned"),
             "unexpected outcome:\n{}",
@@ -4013,10 +4507,11 @@ fn main() {
         ))
         .await;
 
-        assert!(matches!(
-            outcome.final_status,
-            RuntimeTaskLifecycleStatus::Failed
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(outcome.final_status, RuntimeTaskLifecycleStatus::Failed),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
         assert!(
             outcome.cases.is_empty(),
             "unexpected outcome:\n{}",
@@ -4050,10 +4545,14 @@ with open("/bin/owned", "w", encoding="utf-8") as handle:
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::SecurityViolation
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::SecurityViolation
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -4074,10 +4573,14 @@ finally:
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::SecurityViolation
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::SecurityViolation
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -4097,11 +4600,15 @@ subprocess.run(["/bin/sh", "-c", "echo pwned"], check=False)
         .await;
 
         assert_failed_with_single_case(&outcome);
-        assert!(matches!(
-            outcome.cases[0].status,
-            super::RuntimeCaseFinalStatus::SecurityViolation
-                | super::RuntimeCaseFinalStatus::RuntimeError
-        ), "unexpected outcome:\n{}", outcome_debug(&outcome));
+        assert!(
+            matches!(
+                outcome.cases[0].status,
+                super::RuntimeCaseFinalStatus::SecurityViolation
+                    | super::RuntimeCaseFinalStatus::RuntimeError
+            ),
+            "unexpected outcome:\n{}",
+            outcome_debug(&outcome)
+        );
         assert!(
             !outcome.cases[0].stdout_excerpt.contains("pwned"),
             "unexpected outcome:\n{}",
@@ -4693,8 +5200,6 @@ subprocess.run(["/bin/sh", "-c", "echo pwned"], check=False)
         assert!(!wasm_syscalls.contains(&"newfstat"));
         assert!(compiler_syscalls.contains(&"newfstat"));
     }
-
-
 
     fn runtime_task(task_id: &str, queue: &str, lane: &str) -> RuntimeTask {
         RuntimeTask {

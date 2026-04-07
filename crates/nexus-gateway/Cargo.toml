@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 nexus-auth = { path = "../nexus-auth" }
 nexus-config = { path = "../nexus-config" }
+nexus-jobs = { path = "../nexus-jobs" }
 nexus-oj = { path = "../nexus-oj" }
 nexus-runtime = { path = "../nexus-runtime" }
 nexus-storage = { path = "../nexus-storage" }

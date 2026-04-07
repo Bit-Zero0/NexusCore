@@ -1,9 +1,11 @@
 [workspace]
 members = [
+  "crates/nexus-alert-relay",
   "crates/nexus-app",
   "crates/nexus-auth",
   "crates/nexus-config",
   "crates/nexus-gateway",
+  "crates/nexus-jobs",
   "crates/nexus-oj",
   "crates/nexus-runtime",
   "crates/nexus-storage",
@@ -26,11 +28,16 @@ thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time", "process"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 async-trait = "0.1"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "json"] }
 ulid = "1"
 redis = { version = "0.27", features = ["tokio-comp"] }
 lapin = "2.5"
+async-nats = "0.38"
+futures-util = "0.3"
 tokio-executor-trait = "2.4"
 tokio-reactor-trait = "1.1"
+once_cell = "1"
+prometheus = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

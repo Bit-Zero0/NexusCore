@@ -1,0 +1,193 @@
+name: Runtime Matrix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/runtime-matrix.yml"
+      - "crates/nexus-alert-relay/**"
+      - "crates/nexus-runtime/**"
+      - "crates/nexus-gateway/**"
+      - "crates/nexus-config/**"
+      - "crates/nexus-app/**"
+      - "monitoring/**"
+      - "scripts/**"
+      - "env/**"
+      - "docker-compose.dev.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/runtime-matrix.yml"
+      - "crates/nexus-alert-relay/**"
+      - "crates/nexus-runtime/**"
+      - "crates/nexus-gateway/**"
+      - "crates/nexus-config/**"
+      - "crates/nexus-app/**"
+      - "monitoring/**"
+      - "scripts/**"
+      - "env/**"
+      - "docker-compose.dev.yml"
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      full_matrix: ${{ steps.changes.outputs.full_matrix }}
+      light_smoke: ${{ steps.changes.outputs.light_smoke }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect change scope
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            full_matrix:
+              - 'crates/nexus-runtime/**'
+              - 'crates/nexus-gateway/**'
+              - 'crates/nexus-config/**'
+              - 'crates/nexus-app/**'
+              - 'scripts/**'
+              - 'env/dev.compose*.env'
+              - 'docker-compose.dev.yml'
+            light_smoke:
+              - 'crates/nexus-alert-relay/**'
+              - 'monitoring/**'
+              - '.github/workflows/runtime-matrix.yml'
+              - 'env/alerting.local.env'
+
+  full-matrix:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.full_matrix == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Start broker dependencies
+        run: docker compose -f docker-compose.dev.yml up -d postgres redis rabbitmq nats nats-exporter
+
+      - name: Wait for dependencies
+        run: |
+          timeout 120 bash -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" nexus-postgres)" = "healthy" ]; do sleep 2; done'
+          timeout 120 bash -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" nexus-redis)" = "healthy" ]; do sleep 2; done'
+          timeout 120 bash -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" nexus-rabbitmq)" = "healthy" ]; do sleep 2; done'
+          timeout 120 bash -c 'until curl -fsS http://127.0.0.1:8222/varz >/dev/null; do sleep 2; done'
+          docker ps
+
+      - name: Broker integration tests
+        env:
+          NEXUS_RABBITMQ_TEST_URL: amqp://guest:guest@127.0.0.1:5672/%2f
+          NEXUS_NATS_TEST_URL: nats://127.0.0.1:4222
+          NEXUS_REDIS_STREAMS_TEST_URL: redis://127.0.0.1:6379/
+        run: |
+          cargo test -p nexus-runtime rabbitmq -- --nocapture
+          cargo test -p nexus-runtime nats -- --nocapture
+          cargo test -p nexus-runtime redis_streams -- --nocapture
+
+      - name: Alert relay check
+        run: cargo check -p nexus-alert-relay
+
+      - name: Runtime startup full matrix
+        env:
+          OJ_REPOSITORY_OVERRIDE: memory
+        run: |
+          chmod +x scripts/run_nexus_role.sh scripts/smoke_runtime_matrix.sh
+          ./scripts/smoke_runtime_matrix.sh
+
+      - name: Compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.dev.yml logs --no-color > /tmp/full-matrix-compose.log
+
+      - name: Upload full-matrix artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-matrix-full-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            /tmp/full-matrix-compose.log
+            /tmp/nexus-runtime-matrix
+            /tmp/nexus-alert-relay.log
+            /tmp/nexus-alert-relay
+
+      - name: Stop dependencies
+        if: always()
+        run: docker compose -f docker-compose.dev.yml down -v
+
+  light-smoke:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.full_matrix != 'true' && needs.detect-changes.outputs.light_smoke == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Start minimal dependencies
+        run: docker compose -f docker-compose.dev.yml up -d postgres redis rabbitmq
+
+      - name: Wait for minimal dependencies
+        run: |
+          timeout 120 bash -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" nexus-postgres)" = "healthy" ]; do sleep 2; done'
+          timeout 120 bash -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" nexus-redis)" = "healthy" ]; do sleep 2; done'
+          timeout 120 bash -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" nexus-rabbitmq)" = "healthy" ]; do sleep 2; done'
+          docker ps
+
+      - name: Alert relay check
+        run: cargo check -p nexus-alert-relay
+
+      - name: Alert relay HTTP smoke
+        env:
+          NEXUS_ALERT_DRY_RUN: "true"
+          NEXUS_ALERT_AUDIT_LOG_PATH: /tmp/nexus-alert-relay/audit.jsonl
+        run: |
+          cargo run -p nexus-alert-relay > /tmp/nexus-alert-relay.log 2>&1 &
+          relay_pid=$!
+          trap 'kill $relay_pid || true' EXIT
+          timeout 60 bash -c 'until curl -fsS http://127.0.0.1:18081/healthz >/dev/null; do sleep 2; done'
+          curl -fsS -X POST http://127.0.0.1:18081/dry-run \
+            -H 'Content-Type: application/json' \
+            --data '{"status":"firing","alerts":[{"labels":{"alertname":"LightSmoke","severity":"warning"}}]}'
+          test -f /tmp/nexus-alert-relay/audit.jsonl
+
+      - name: Runtime startup light smoke
+        env:
+          OJ_REPOSITORY_OVERRIDE: memory
+          BROKERS: rabbitmq
+          ROLES: embedded
+        run: |
+          chmod +x scripts/run_nexus_role.sh scripts/smoke_runtime_matrix.sh
+          ./scripts/smoke_runtime_matrix.sh
+
+      - name: Compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.dev.yml logs --no-color > /tmp/light-smoke-compose.log
+
+      - name: Upload light-smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-matrix-light-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            /tmp/light-smoke-compose.log
+            /tmp/nexus-runtime-matrix
+            /tmp/nexus-alert-relay.log
+            /tmp/nexus-alert-relay
+
+      - name: Stop dependencies
+        if: always()
+        run: docker compose -f docker-compose.dev.yml down -v
